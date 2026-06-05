@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sch_prototype")
 
 # Hardcoded scholarship name to test (change this to check different ones)
-TEST_SCHOLARSHIP_NAME = "Australia Awards Scholarship (AAS)"
+TEST_SCHOLARSHIP_NAME = "Beasiswa Indonesia Bangkit (BIB) - LPDP"
 
 class CerebrasQuotaExceededException(Exception):
     pass
@@ -268,14 +268,8 @@ def fetch_webpage_content(url: str, retries: int = 2, retry_delay: int = 180) ->
             logger.info(f"Fetching URL (Attempt {attempt}/{retries}): {url}")
             response = requests.get(url, headers=headers, timeout=15)
             
-            # 403 = permanently blocked (firewall/WAF) — sleeping won't help, skip immediately.
-            # 429 = genuine rate limit — sleeping and retrying is the right call.
-            if response.status_code == 403:
-                logger.warning(f"403 Forbidden on {url} — permanently blocked. Skipping immediately.")
-                return None
-
             is_blocked = False
-            if response.status_code == 429:
+            if response.status_code in [429, 403]:
                 is_blocked = True
             else:
                 # Strip scripts/styles before checking — JS variable names like 'silentcaptcha'
@@ -342,43 +336,6 @@ def extract_hyperlinks(html_content: str, base_url: str) -> List[Dict[str, str]]
             links.append({"text": text, "url": absolute_url})
     return links
 
-# Official government / embassy / academic domains whose news/announcement
-# sub-pages are still authoritative sources — never block these regardless of path.
-OFFICIAL_DOMAINS = [
-    ".go.id", ".go.jp", ".go.kr", ".go.th", ".go.au", ".gov", ".gov.au",
-    ".ac.id", ".ac.jp", ".ac.kr", ".edu", ".edu.au",
-    "emb-japan.go.jp", "mofa.go.kr", "niied.go.kr", "koica.go.kr",
-    "scholarshipdb.net", "daad.de", "chevening.org", "britishcouncil.org"
-]
-
-def is_official_domain(url: str) -> bool:
-    """Returns True if the URL belongs to a trusted government, embassy, or academic domain."""
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in OFFICIAL_DOMAINS)
-
-# News/media domains that should never be used as official scholarship sources.
-# Links from these domains are filtered OUT of candidate_info to prevent the LLM
-# from citing a news article instead of the real official site.
-# Note: official government domains (e.g. kemenag.go.id/nasional/) are NOT
-# blocked even if they publish news-style posts — those are official announcements.
-NEWS_MEDIA_DOMAINS = [
-    "kompas.com", "detik.com", "tribunnews.com", "liputan6.com", "okezone.com",
-    "sindonews.com", "cnnindonesia.com", "tempo.co", "bisnis.com", "kumparan.com",
-    "merdeka.com", "suara.com", "republika.co.id", "antara.co.id", "jpnn.com",
-    "jawapos.com", "inews.id", "idntimes.com", "viva.co.id", "beritasatu.com",
-    "thejakartapost.com", "medcom.id", "metrotvnews.com", "cnbcindonesia.com",
-    "news.google.com", "yahoo.com/news", "bing.com/news"
-]
-
-def is_news_domain(url: str) -> bool:
-    """Returns True if the URL belongs to a known third-party news/media outlet.
-    Official government/academic domains are never classified as news even if
-    they publish news-style announcement posts."""
-    if is_official_domain(url):
-        return False  # Never block official domains
-    url_lower = url.lower()
-    return any(domain in url_lower for domain in NEWS_MEDIA_DOMAINS)
-
 def filter_candidate_links(links: List[Dict[str, str]], scholarship_name: str) -> Dict[str, List[str]]:
     keywords = [w.lower() for w in scholarship_name.split() if len(w) > 3]
     keywords_info = keywords + ["research", "rs", "student", "graduate", "announcement", "scholarship", "guideline", "guide", "tahap", "stem"]
@@ -394,11 +351,8 @@ def filter_candidate_links(links: List[Dict[str, str]], scholarship_name: str) -
         if any(kw in url_lower or kw in text_lower for kw in keywords_reg):
             candidate_reg.append(l["url"])
             
-        # Never include third-party news/media sites as official info sources.
-        # Official government / academic domains ARE allowed even if news-like.
-        if not is_news_domain(l["url"]):
-            if any(kw in url_lower or kw in text_lower for kw in keywords_info):
-                candidate_info.append(l["url"])
+        if any(kw in url_lower or kw in text_lower for kw in keywords_info):
+            candidate_info.append(l["url"])
             
     return {
         "info": list(set(candidate_info))[:10],
@@ -407,6 +361,10 @@ def filter_candidate_links(links: List[Dict[str, str]], scholarship_name: str) -
 
 def verify_scholarship_llama(
     scholarship_name: str,
+    historical_method: str,
+    historical_info_link: str,
+    historical_reg_link: str,
+    estimated_timeline: str,
     scraped_web_text: str,
     candidate_info_links: List[str],
     candidate_reg_links: List[str],
@@ -414,9 +372,6 @@ def verify_scholarship_llama(
 ) -> Dict[str, Any]:
     """
     Calls the OpenAI-compatible endpoint (Cerebras/Llama) using requests.
-    NOTE: Only the scholarship name and independently scraped web content are
-    passed here. No spreadsheet historical data is provided — the LLM must
-    discover all links, dates, and status from the web context alone.
     """
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL", "https://api.cerebras.ai/v1")
@@ -434,38 +389,32 @@ You must output a JSON object with the following fields:
 2. "status": Strictly choose one: 'OPEN' | 'CLOSED' | 'NOT_YET_OPENED'
 3. "application_start_date": String in YYYY-MM-DD format, or null if unknown
 4. "application_deadline": String in YYYY-MM-DD format, or null if unknown
-5. "official_source_url": The primary official info URL (government/embassy/university/foundation page). Must NOT be a third-party news site.
-6. "official_registration_url": The verified submission/registration portal URL (must be different from official_source_url), or null.
-7. "supplementary_source_url": If the PRIMARY source has no current cycle dates but you found an official government/embassy/ministry announcement page (same official domain, e.g. /nasional/, /news/, /berita/) with more up-to-date or extended deadline info — output that announcement URL here. Only use this for truly official domain posts, NOT for third-party media. Output null if not applicable.
-8. "url_verification_fallback_used": true (boolean) if no web content was successfully scraped and the output relies on LLM training knowledge alone; false (boolean) if scraped page content was used.
-9. "confidence_score": Float between 0.0 to 1.0 reflecting source reliability based on the text context
-10. "processing_method_detected": Detect if registration requires 'Online', 'Offline/Mail-in', 'Hybrid', or 'Register First, Upload Later' (string)
-11. "remarks": A concise summary. If dates come from two different sources (primary page vs. announcement post), explain the discrepancy. Always cite which page URL the dates were extracted from.
+5. "official_source_url": The verified specific information link found or validated (string)
+6. "official_registration_url": The verified specific submission/registration link found or validated (string)
+7. "url_verification_fallback_used": true (boolean) if the independent scraped text was insufficient and you had to rely strictly on the user's historical links, false (boolean) if the scraped text found cleaner/newer active links
+8. "confidence_score": Float between 0.0 to 1.0 reflecting source reliability based on the text context
+9. "processing_method_detected": Detect if registration requires 'Online', 'Offline/Mail-in', 'Hybrid', or 'Register First, Upload Later' (string)
+10. "remarks": A brief, concise summary of findings or notes (string)
 
 CRITICAL RULES FOR LINKS — READ CAREFULLY AND FOLLOW STRICTLY:
-- "official_source_url" (Info Link) MUST be a URL from the OFFICIAL scholarship body — a government ministry, embassy, university, or foundation. NEVER cite a news article, blog, or third-party media site (e.g. kompas.com, detik.com, tribunnews.com, liputan6.com, etc.) as the official_source_url. This is an absolute rule.
+- "official_source_url" (Info Link) MUST be a URL that leads to a page with scholarship details, announcement text, guidelines, or timeline information.
 - "official_registration_url" (Registration Link) MUST be a DIFFERENT URL that directly allows the user to register, log in, or submit an online application (e.g., a portal login page, Google Form, or direct submission URL).
 - ABSOLUTELY FORBIDDEN: Do NOT output the same URL for both "official_source_url" and "official_registration_url" unless the registration form is literally embedded directly on the info page itself. This is a hard rule with zero exceptions.
-- If you cannot find a distinct registration link, output null for "official_registration_url". Do NOT copy the info URL and do NOT invent a URL.
-- If you cannot find a verified official source URL, output null for "official_source_url". Do NOT use a news article URL as a fallback.
-- Always prefer specific sub-page URLs (e.g., /apply, /register, /form, /pendaftaran, /burse-2026, /news/2026-application) over generic homepage URLs.
-- For date extraction: Parse application dates precisely from the page text. Look for explicit open/close/deadline date ranges labelled as 'important date', 'deadline', 'application period', 'batas waktu', or similar. Output in YYYY-MM-DD format.
+- If you cannot find a distinct registration link, set "official_registration_url" to the best candidate from the CANDIDATE REGISTRATION LINKS list, or null. Do NOT copy the info URL.
+- Always prefer specific sub-page URLs (e.g., /apply, /register, /form, /pendaftaran) over generic homepage URLs for the registration field.
+- Prioritize selecting from the provided lists of "CANDIDATE INFO LINKS" and "CANDIDATE REGISTRATION LINKS" if they are available and relevant.
+- For date extraction: Parse application dates precisely from the page text. Look for explicit open/close/deadline date ranges. Output in YYYY-MM-DD format.
 
 SYSTEM LOGIC & ANALYSIS STRATEGY:
-1. PHASE 1: Scan all PAGE URL sections in the scraped web context. Identify which pages belong to official scholarship bodies (government, embassy, university, foundation) vs. news/blog sites.
-2. PHASE 2: Find the most current application window dates from the scraped text. Look for explicit date ranges in sections labelled 'Important Date', 'Application Period', 'Deadline', or similar. Dates found on official pages take priority over dates found on news/blog pages.
-3. PHASE 3: Select distinct, specific URLs for info and registration from the CANDIDATE LINKS lists — never duplicates.
-4. URL INTEGRITY RULE (STRICT): Only output URLs that were literally present in:
-   a) The scraped page text (shown in the PAGE URL sections below)
-   b) The CANDIDATE INFO LINKS or CANDIDATE REGISTRATION LINKS lists
-   NEVER construct, infer, guess, or modify URL paths (e.g. do not change /app/beranda to /register, or add /apply to a domain). If no valid URL is found, output null.
-5. STATUS RULE (STRICT): Compare the application deadline you find against TODAY'S DATE (provided in the user prompt).
+1. PHASE 1: Find the most current application window dates from the scraped text. Look for explicit date ranges like 'February 12 to February 25, 2026'.
+2. PHASE 2: Cross-reference discovered timelines/links with historical links.
+3. PHASE 3: Select distinct, specific URLs for info and registration — never duplicates.
+4. STATUS RULE (STRICT): Compare the application deadline you find against TODAY'S DATE (provided in the user prompt).
    - If today's date is BEFORE the application start date → status = 'NOT_YET_OPENED'
    - If today's date is WITHIN start and end date → status = 'OPEN'
    - If today's date is AFTER the application deadline → status = 'CLOSED'
-   - If no explicit deadline is found in the scraped text → ASSUME status = 'CLOSED' (conservative). Do NOT output 'OPEN' without an explicit future deadline date. This is a hard rule.
+   - If no dates found, use the estimated timeline and apply the same logic.
    - NEVER output 'OPEN' if today's date is after the deadline. This is a hard rule.
-6. DATE PRIORITY RULE: If the scraped page text contains explicit, precise dates (e.g. '2026-11-01 to 2027-01-31'), use those as ground truth. Only use context clues or estimates if NO explicit dates appear anywhere in the scraped content.
 """
 
     candidate_info_str = "\n".join([f"- {url}" for url in candidate_info_links]) if candidate_info_links else "None found."
@@ -474,7 +423,12 @@ SYSTEM LOGIC & ANALYSIS STRATEGY:
     user_prompt = f"""
 TODAY'S DATE: {time.strftime('%Y-%m-%d')} (use this to determine if the scholarship is currently OPEN, CLOSED, or NOT_YET_OPENED)
 
-SCHOLARSHIP NAME TO VERIFY: {scholarship_name}
+INPUT SPREADSHEET ROW DETAILS:
+- Scholarship Name: {scholarship_name}
+- Processing Method (Historical): {historical_method}
+- Info Link (Historical): {historical_info_link}
+- Registration Link (Historical): {historical_reg_link}
+- Estimated Timeline: {estimated_timeline}
 
 RAW SCRAPED WEB CONTEXT:
 {scraped_web_text}
@@ -538,7 +492,7 @@ def run_comparison():
     
     logger.info("Connecting to Google Sheets...")
     conn = GoogleSheetsConnector()
-    conn.connect(read_only=True)  # Prototype: never touch the sheet structure
+    conn.connect()
     
     # Read spreadsheet data rows
     range_name = f"'{conn.wks.title}'!A1:T500"
@@ -565,13 +519,25 @@ def run_comparison():
                 cell = cells[col_idx - 1]
                 return cell.get("formattedValue", "").strip()
             return ""
-
-        # Only read scholarship_name — no historical links or metadata used by the engine
+        def get_cell_link(field_key: str) -> str:
+            col_idx = conn.col_map.get(field_key)
+            if col_idx and col_idx <= len(cells):
+                cell = cells[col_idx - 1]
+                return conn.extract_hyperlink(cell)
+            return ""
+            
         name = get_cell_text("scholarship_name")
         if name.strip().lower() == TEST_SCHOLARSHIP_NAME.strip().lower():
+            info_link = get_cell_link("historical_info_link") or get_cell_text("historical_info_link")
+            reg_link = get_cell_link("historical_reg_link") or get_cell_text("historical_reg_link")
             matched_row = {
                 "row_idx": idx,
                 "scholarship_name": name,
+                "country_region": get_cell_text("country_region"),
+                "historical_method": get_cell_text("historical_method") or "Online",
+                "historical_info_link": info_link,
+                "historical_reg_link": reg_link,
+                "estimated_timeline": get_cell_text("estimated_timeline")
             }
             break
             
@@ -579,49 +545,34 @@ def run_comparison():
         logger.error(f"Could not find scholarship '{TEST_SCHOLARSHIP_NAME}' in sheet!")
         return
         
-    logger.info(f"Matched scholarship in sheet: row={matched_row['row_idx']}, name='{matched_row['scholarship_name']}'")
+    logger.info(f"Successfully matched sheet details: {matched_row}")
     
     processed_results = []
     model_name = os.getenv("OPENAI_MODEL_2", "zai-glm-4.7")
     
     quota_exceeded = False
     sch_name = TEST_SCHOLARSHIP_NAME
+    country = matched_row.get("country_region", "").strip()
+    today_str = time.strftime('%Y-%m-%d')  # e.g. '2026-06-05'
 
-    # Search query: scholarship name + year only — no country hardcoded.
-    # Everything must be discovered from the web; no spreadsheet metadata is used.
-    search_query = f"{sch_name} important date deadline {time.strftime('%Y')}"
-    logger.info(f"Search query: '{search_query}'")
+    search_query = f"{sch_name} Indonesia deadline {time.strftime('%Y')}".strip()
     search_results = search_scholarship_with_retry(search_query) or []
     
     # 2. Deep scraping & link extraction
-    # Only from search results — historical spreadsheet links are NOT scraped.
     scraped_pages = []
     all_candidate_info = []
     all_candidate_reg = []
     fetched_urls = set()
     
-    # Put official/government results first so they get scraped and branched into first
-    official_results = [(r["url"], "Search Result") for r in search_results[:5] if not is_news_domain(r["url"])]
-    news_results    = [(r["url"], "Search Result") for r in search_results[:5] if is_news_domain(r["url"])]
-    urls_to_scrape  = official_results + news_results
+    urls_to_scrape = []
+    if matched_row["historical_info_link"]:
+        urls_to_scrape.append((matched_row["historical_info_link"], "Historical Info Link"))
+    if matched_row["historical_reg_link"]:
+        urls_to_scrape.append((matched_row["historical_reg_link"], "Historical Registration Link"))
+    for res in search_results[:3]:
+        urls_to_scrape.append((res["url"], "Search Result"))
         
     BINARY_EXTENSIONS = (".pdf", ".xlsx", ".xls", ".docx", ".doc", ".ppt", ".pptx", ".zip", ".rar")
-    
-    # Branching keywords — broad enough to catch news/announcement sub-pages like
-    # /news/2026-application, /burse-2026, /program/scholarship, etc.
-    branching_keywords = [
-        "research", "rs", "graduate", "indonesia", "tahap",
-        "announcement", "guideline", "scholar", "2026", "2025",
-        "deadline", "apply", "apply-now", "schedule", "timeline",
-        "gks", "kgsp", "niied",
-        "news", "application", "open", "program", "burse",
-        "scholarship", "grant", "award", "selection", "intake",
-        "period", "cycle", "applic", "eligib", "require"
-    ]
-    # Global branching counter — shared across ALL top-level pages so we get
-    # up to MAX_BRANCHES total sub-page fetches, not 2 per top-level URL.
-    branching_count = 0
-    MAX_BRANCHES = 4
     
     for url, url_type in urls_to_scrape:
         if not url or url in fetched_urls:
@@ -657,49 +608,23 @@ def run_comparison():
             "content": truncated_text
         })
         
-        # Determine the domain of the current page for same-domain branching
-        current_netloc = urllib.parse.urlparse(url).netloc.lower()
-
+        branching_keywords = [
+            "research", "rs", "graduate", "indonesia", "tahap",
+            "announcement", "guideline", "scholar", "2026", "2025",
+            "deadline", "apply", "apply-now", "schedule", "timeline",
+            "gks", "kgsp", "niied"
+        ]
+        branching_count = 0
         for sub_url in candidates["info"]:
-            if branching_count >= MAX_BRANCHES:
+            if branching_count >= 2:
                 break
             if sub_url == url or sub_url in fetched_urls:
                 continue
-
-            sub_parsed = urllib.parse.urlparse(sub_url)
-            sub_netloc = sub_parsed.netloc.lower()
-            sub_path = sub_parsed.path.lower()
-
-            # Hard-skip known useless URL patterns and noise domains
-            USELESS_PATH_PATTERNS = (
-                "/search/label/", "/search/tag/", "/tag/", "/category/",
-                "/contact", "/about", "/privacy", "/terms", "/faq",
-                "/p/contact", "/p/about", "/sitemap",
-            )
-            USELESS_DOMAINS = (
-                "www.google.com", "google.com", "translate.google.com",
-                "twitter.com", "x.com", "instagram.com", "facebook.com",
-                "linkedin.com", "youtube.com", "t.me", "wa.me",
-            )
-            if sub_netloc in USELESS_DOMAINS:
-                continue
-            if any(pat in sub_path for pat in USELESS_PATH_PATTERNS):
-                continue
-
-            # DOMAIN RESTRICTION: Only branch into sub-pages of the CURRENT page's
-            # domain, or into known official domains. This prevents aggregator sites
-            # like fullscholarships.net from burning the branch budget on their own
-            # "related scholarship" articles from completely different sites.
-            is_same_domain = (sub_netloc == current_netloc)
-            is_official = is_official_domain(sub_url)
-            if not is_same_domain and not is_official:
-                continue
-
-            # Match keywords against the URL PATH only (not domain) to avoid
-            # substring false-positives from the domain name itself
-            if any(kw in sub_path for kw in branching_keywords):
+            url_lower = sub_url.lower()
+            # Check for name-specific keywords and sub-page indicators
+            if any(kw in url_lower for kw in branching_keywords):
                 fetched_urls.add(sub_url)
-                logger.info(f"Following branching sub-link ({branching_count + 1}/{MAX_BRANCHES}): {sub_url}")
+                logger.info(f"Following branching sub-link ({branching_count + 1}): {sub_url}")
                 sub_html = fetch_webpage_content(sub_url)
                 if sub_html:
                     sub_text = clean_html(sub_html)[:5000]
@@ -707,7 +632,7 @@ def run_comparison():
                     sub_candidates = filter_candidate_links(sub_links, sch_name)
                     all_candidate_info.extend(sub_candidates["info"])
                     all_candidate_reg.extend(sub_candidates["reg"])
-
+                    
                     scraped_pages.append({
                         "url": sub_url,
                         "type": "Branching Sub-link",
@@ -731,109 +656,27 @@ def run_comparison():
         
     unique_candidate_info = list(set(all_candidate_info))[:15]
     unique_candidate_reg = list(set(all_candidate_reg))[:15]
-
-    # Build the set of ALL URLs actually visited/found via scraping — used to validate LLM output.
-    # No historical spreadsheet links are included here.
-    all_known_urls = set(fetched_urls)
-    all_known_urls.update(all_candidate_info)
-    all_known_urls.update(all_candidate_reg)
     
-    # 3. Invoke Cerebras LLM API
+    # 3. Invoke Cerebras Llama API
     try:
         verified_data = verify_scholarship_llama(
             scholarship_name=matched_row["scholarship_name"],
+            historical_method=matched_row["historical_method"],
+            historical_info_link=matched_row["historical_info_link"],
+            historical_reg_link=matched_row["historical_reg_link"],
+            estimated_timeline=matched_row["estimated_timeline"],
             scraped_web_text=context_str,
             candidate_info_links=unique_candidate_info,
             candidate_reg_links=unique_candidate_reg,
             model_name=model_name
         )
         
-        # Sanitize links: replace empty strings or literal "None" strings with Python None
-        def sanitize_link(val):
-            if not val or str(val).strip().lower() in ("none", "", "null", "-", "n/a"):
-                return None
-            return val
-        
-        verified_data["official_source_url"] = sanitize_link(verified_data.get("official_source_url"))
-        verified_data["official_registration_url"] = sanitize_link(verified_data.get("official_registration_url"))
-        verified_data["supplementary_source_url"] = sanitize_link(verified_data.get("supplementary_source_url"))
-
-        # Validate supplementary_source_url: only keep if from a trusted official domain
-        supp_url = verified_data.get("supplementary_source_url")
-        if supp_url and is_news_domain(supp_url):
-            logger.warning(f"Supplementary URL '{supp_url}' is a news/media site — discarding.")
-            verified_data["supplementary_source_url"] = None
-
-        # ── URL HALLUCINATION GUARD ──────────────────────────────────────────────
-        # Validate that the reg URL the LLM returned was actually seen during scraping.
-        # If not, reject it — no historical fallback exists, so set to None.
-        reg_url = verified_data.get("official_registration_url")
-        if reg_url and reg_url not in all_known_urls:
-            reg_domain = urllib.parse.urlparse(reg_url).netloc
-            domain_seen = any(
-                urllib.parse.urlparse(u).netloc == reg_domain
-                for u in all_known_urls if u
-            )
-            if not domain_seen:
-                logger.warning(
-                    f"Reg URL '{reg_url}' domain was never scraped — "
-                    f"likely hallucinated. Setting to null."
-                )
-            else:
-                logger.warning(
-                    f"Reg URL '{reg_url}' has a known domain but an unseen path — "
-                    f"setting to null to avoid hallucinated paths."
-                )
-            verified_data["official_registration_url"] = None
-
-        # ── INFO URL HALLUCINATION GUARD ─────────────────────────────────────────
-        # Validate info URL domain was actually seen in scraping.
-        # Allow sub-pages of scraped domains (e.g. /news/2026-application is fine
-        # if the domain itself was visited). Reject entirely unknown domains.
-        info_url = verified_data.get("official_source_url")
-        if info_url and info_url not in all_known_urls:
-            info_domain = urllib.parse.urlparse(info_url).netloc
-            domain_seen = any(
-                urllib.parse.urlparse(u).netloc == info_domain
-                for u in all_known_urls if u
-            )
-            if not domain_seen:
-                logger.warning(
-                    f"Info URL '{info_url}' domain was never scraped — "
-                    f"likely hallucinated. Setting to null."
-                )
-                verified_data["official_source_url"] = None
-            else:
-                logger.info(
-                    f"Info URL '{info_url}' path not in exact list but domain is known — "
-                    f"keeping as valid sub-page of a scraped domain."
-                )
-
-        # ── STATUS SAFETY NET ───────────────────────────────────────────────────
-        # If LLM returned OPEN but couldn't find a deadline, we can't confirm it.
-        # Default conservatively to CLOSED so the user doesn't miss a deadline.
-        if (verified_data.get("status") == "OPEN"
-                and verified_data.get("application_deadline") is None):
-            logger.warning(
-                "Status is OPEN but no deadline was found — cannot confirm. "
-                "Forcing status to CLOSED (conservative fallback)."
-            )
-            verified_data["status"] = "CLOSED"
-            verified_data["remarks"] = (
-                (verified_data.get("remarks") or "") +
-                " [Status overridden to CLOSED: no explicit deadline date found to confirm OPEN.]"
-            ).strip()
-        
-        print(f"Verified Status:           {verified_data.get('status')}")
-        print(f"Verified Start Date:       {verified_data.get('application_start_date')}")
-        print(f"Verified Deadline:         {verified_data.get('application_deadline')}")
-        print(f"Processing Method:         {verified_data.get('processing_method_detected')}")
-        print(f"Confidence Score:          {verified_data.get('confidence_score')}")
-        print(f"Verified Info URL:         {verified_data.get('official_source_url')}")
-        print(f"Supplementary URL:         {verified_data.get('supplementary_source_url')}")
-        print(f"Verified Reg URL:          {verified_data.get('official_registration_url')}")
-        print(f"Fallback Used:             {verified_data.get('url_verification_fallback_used')}")
-        print(f"Remarks:                   {verified_data.get('remarks')}")
+        print(f"Verified Status: {verified_data.get('status')}")
+        print(f"Verified Start Date: {verified_data.get('application_start_date')}")
+        print(f"Verified Deadline: {verified_data.get('application_deadline')}")
+        print(f"Verified Info URL: {verified_data.get('official_source_url')}")
+        print(f"Verified Reg URL: {verified_data.get('official_registration_url')}")
+        print(f"Remarks: {verified_data.get('remarks')}")
         
         processed_results.append({
             "row_idx": matched_row["row_idx"],
@@ -845,6 +688,7 @@ def run_comparison():
         quota_exceeded = True
     except Exception as e:
         logger.error(f"Verification failed for '{sch_name}': {str(e)}", exc_info=True)
+        # Add error result so we still report it
         processed_results.append({
             "row_idx": matched_row["row_idx"],
             "verified_data": {
@@ -852,19 +696,25 @@ def run_comparison():
                 "status": "CLOSED",
                 "application_start_date": None,
                 "application_deadline": None,
-                "official_source_url": None,
-                "official_registration_url": None,
+                "official_source_url": matched_row["historical_info_link"],
+                "official_registration_url": matched_row["historical_reg_link"],
                 "url_verification_fallback_used": True,
                 "confidence_score": 0.0,
-                "processing_method_detected": "Unknown",
+                "processing_method_detected": matched_row["historical_method"],
                 "remarks": f"System error: {str(e)}"
             }
         })
         
-    # Prototype mode: DO NOT write to the sheet.
-    # Only send the email report so you can review results without touching spreadsheet data.
+    # Write results so far and send email report
     if processed_results:
-        logger.info("Prototype mode: skipping sheet write. Sending email report only...")
+        logger.info(f"Initiating spreadsheet update for {len(processed_results)} rows...")
+        try:
+            conn.batch_write_results(processed_results)
+            logger.info("Google Sheet successfully updated!")
+        except Exception as sheet_err:
+            logger.error(f"Failed to update sheet: {str(sheet_err)}")
+            
+        logger.info("Sending report email...")
         send_scout_report_email(processed_results, quota_exceeded)
     else:
         logger.warning("No results to save or email.")
@@ -904,33 +754,18 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
         status = data.get("status", "CLOSED")
         status_color = "#2ecc71" if status == "OPEN" else ("#f39c12" if status == "NOT_YET_OPENED" else "#e74c3c")
         
-        info_url = data.get("official_source_url")
-        supp_url = data.get("supplementary_source_url")
-        reg_url  = data.get("official_registration_url")
-        
-        # Build info link cell — primary + optional supplementary announcement link
-        if info_url:
-            info_cell = f'<a href="{info_url}" style="color: #3498db; text-decoration: none;">Info Link</a>'
-        else:
-            info_cell = '<span style="color: #bdc3c7;">—</span>'
-        if supp_url:
-            info_cell += f' &nbsp;<a href="{supp_url}" style="color: #8e44ad; text-decoration: none; font-size: 11px;">[Announcement ↗]</a>'
-        
-        reg_cell = (
-            f'<a href="{reg_url}" style="color: #2ecc71; text-decoration: none; font-weight: bold;">Reg Link</a>'
-            if reg_url else '<span style="color: #bdc3c7;">—</span>'
-        )
-        
-        method = data.get("processing_method_detected") or "—"
         rows.append(f"""
         <tr style="border-bottom: 1px solid #dddddd;">
             <td style="padding: 12px 15px; font-weight: bold; color: #333333;">{data.get("scholarship_name")}</td>
             <td style="padding: 12px 15px; font-weight: bold; color: {status_color};">{status}</td>
             <td style="padding: 12px 15px; color: #555555;">{data.get("application_start_date") or "N/A"}</td>
             <td style="padding: 12px 15px; color: #555555;">{data.get("application_deadline") or "N/A"}</td>
-            <td style="padding: 12px 15px; font-size: 12px;">{info_cell}</td>
-            <td style="padding: 12px 15px; font-size: 12px;">{reg_cell}</td>
-            <td style="padding: 12px 15px; color: #555555; font-size: 12px;">{method}</td>
+            <td style="padding: 12px 15px; font-size: 12px;">
+                <a href="{data.get("official_source_url")}" style="color: #3498db; text-decoration: none;">Info Link</a>
+            </td>
+            <td style="padding: 12px 15px; font-size: 12px;">
+                <a href="{data.get("official_registration_url")}" style="color: #2ecc71; text-decoration: none; font-weight: bold;">Reg Link</a>
+            </td>
             <td style="padding: 12px 15px; color: #7f8c8d; font-size: 13px;">{data.get("remarks")}</td>
         </tr>
         """)
@@ -970,7 +805,6 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
                     <th style="padding: 12px 15px;">Deadline</th>
                     <th style="padding: 12px 15px;">Info Link</th>
                     <th style="padding: 12px 15px;">Reg. Link</th>
-                    <th style="padding: 12px 15px;">Method</th>
                     <th style="padding: 12px 15px;">Remarks</th>
                 </tr>
             </thead>
