@@ -22,6 +22,36 @@ Add a new entry for any scholarship that:
 
 SCHOLARSHIP_CONFIG = {
 
+    # ── TAIWAN ─────────────────────────────────────────────────────────────────
+    "MoE Taiwan": {
+        "preferred_query": "Taiwan MoE Scholarship 2026 Indonesia deadline application timeline",
+        "preferred_urls": [
+            "https://taiwanscholarship.moe.gov.tw/web/pages.aspx?p=8",  # Application Process page (has dates)
+            "https://taiwanscholarship.moe.gov.tw/web/pages.aspx?p=7",  # Scholarship Guidelines
+            "https://taiwanscholarship.moe.gov.tw/Apply/",              # registration portal
+            "https://taiwanscholarship.moe.gov.tw/",                    # root
+            "https://www.roc-taiwan.org/id_en/",                        # TECC Indonesia root (embassy for ID applicants)
+        ],
+        "preferred_domains": [
+            "taiwanscholarship.moe.gov.tw",
+            "moe.edu.tw",
+            "roc-taiwan.org",
+        ],
+        # Hard constraint: only accept dates from the official MoE portal.
+        # Prevents the LLM from picking up US/Japan/other-country embassy announcement pages
+        # which rank high in generic search results but are not relevant for Indonesian applicants.
+        "date_source_domain": "taiwanscholarship.moe.gov.tw",
+        "notes": (
+            "MoE Taiwan Scholarship — official portal is taiwanscholarship.moe.gov.tw. "
+            "TECC Indonesia (roc-taiwan.org/id_en/) is the correct embassy source for Indonesian applicants. "
+            "Generic search returns US/Japan embassy news pages (depart.moe.edu.tw/dc/...) — these are "
+            "overseas-facing announcements, NOT Indonesia-specific. date_source_domain forces LLM to "
+            "reject dates from those non-portal pages. "
+            "NOTE: roc-taiwan.org/id_en/post/3025.html was a known TECC scholarship page but returned 404 — "
+            "removed. Use TECC root instead and rely on taiwanscholarship.moe.gov.tw for date authority."
+        ),
+    },
+
     # ── JAPAN ──────────────────────────────────────────────────────────────────
     "MEXT (Monbukagakusho) - Research Student": {
         "preferred_query":   "MEXT Research Student Scholarship 2026 Indonesia embassy deadline jadwal",
@@ -123,12 +153,19 @@ SCHOLARSHIP_CONFIG = {
     "DAAD STEM Discipline": {
         "preferred_query":   "DAAD STEM scholarship 2026 deadline Germany engineering sciences application",
         "preferred_urls":    [
-            "https://www2.daad.de/deutschland/stipendium/datenbank/en/21148-scholarship-database/?origin=5&status=3&subjectGrps=&daad=&q=&page=1&detail=57742130#voraussetzungen",
+            "https://www2.daad.de/deutschland/stipendium/datenbank/en/21148-scholarship-database/?origin=5&status=3&subjectGrps=&daad=&q=&page=1&detail=57742130",
         ],
         "preferred_domains": ["daad.de"],
+        # DAAD uses Bootstrap CSS tabs: Overview / Application requirements / Application Procedure / ...
+        # All tab content is in the HTML simultaneously (CSS display:none hides inactive tabs).
+        # The default 5,000-char budget is exhausted by the Overview section before reaching
+        # the "Application Procedure" (bewerbungsprozess) tab where the actual dates are.
+        # Increasing to 12,000 chars gets us into that section.
+        "scrape_char_limit": 12000,
         "notes": (
             "Param-based DB URL (detail=57742130) is NEVER indexed by search engines. "
-            "Direct injection required. daad.org/en/2025/... is a news page, not the official DB entry."
+            "Direct injection required. Tab navigation is CSS-only (no URL change on tab switch). "
+            "scrape_char_limit=12000 needed to reach bewerbungsprozess tab past the Overview section."
         ),
     },
 
@@ -144,15 +181,33 @@ SCHOLARSHIP_CONFIG = {
 
     # ── HYUNDAI CMK ───────────────────────────────────────────────────────────
     "Hyundai Motor Chung Mong-Koo Global Scholarship": {
-        "preferred_query":         "Hyundai CMK Foundation Global Scholarship 2026 graduate deadline",
-        "preferred_urls":          ["https://www.cmkfoundation-globalscholarship.org/work/graduates"],
+        # LOCKED MODE: the /work/graduates page has the date info, but it sits
+        # past the 5,000-char scrape truncation limit (privacy modals consume the budget first).
+        # The schedule is fixed ("Dec–Jan / Jun–Jul each year"), so we lock directly.
+        "locked_urls": [
+            "https://www.cmkfoundation-globalscholarship.org/work/graduates",
+            "https://www.cmkfoundation-globalscholarship.org/",
+        ],
         "preferred_domains":       ["cmkfoundation-globalscholarship.org"],
         "date_precision_expected": "monthly",
+        # context_hint is prepended to the LLM user prompt when locked mode is active,
+        # giving it the known fixed schedule so it can infer dates even if truncation hides them.
+        "context_hint": (
+            "KNOWN SCHEDULE (from official page cmkfoundation-globalscholarship.org/work/graduates):\n"
+            "  Spring Semester application: Dec. – Jan. each year\n"
+            "  Fall Semester application:   Jun. – Jul. each year\n"
+            "Use the nearest upcoming cycle relative to TODAY's date. "
+            "Apply monthly inference: start = first of start month, deadline = last of end month. "
+            "Set date_precision = 'monthly'."
+        ),
         "notes": (
-            "Dates published as month ranges only (e.g. Dec-Jan, Jun-Jul). "
-            "LLM date_precision_expected hint tells it to infer first/last of month."
+            "LOCKED MODE: date content is buried past the 5,000-char scrape truncation limit "
+            "due to large privacy modals appearing before the 'Selection Period' section. "
+            "Fixed schedule: Spring=Dec–Jan, Fall=Jun–Jul. context_hint injects the known dates "
+            "directly into the LLM prompt so truncation is irrelevant."
         ),
     },
+
 
     # ── LPDP ─────────────────────────────────────────────────────────────────
     # Any scholarship with separate registration windows per Tahap/Phase
@@ -185,14 +240,62 @@ SCHOLARSHIP_CONFIG = {
 
     # ── ADB-JSP (uni-to-uni — handled by B3 parser) ───────────────────────────
     "(ADB-JSP Scholarship) Institute of Science Tokyo": {
-        "preferred_urls":    ["https://www.isct.ac.jp/en/"],
-        "preferred_domains": ["isct.ac.jp", "adb.org"],
-        "notes": "ADB-JSP at Institute of Science Tokyo (formerly Tokyo Tech). Check English admissions page.",
+        # NOTE: IST (formerly Tokyo Tech) merged with TMD in 2024.
+        # Scholarship info still lives on the OLD titech.ac.jp domain (not yet migrated to isct.ac.jp).
+        # BOTH sites are JavaScript SPAs — scraping yields only JS bundles, no readable dates.
+        # Solution: context_hint + admissions page as Info URL.
+        "preferred_urls": [
+            "https://www.titech.ac.jp/english/international-student-exchange/prospective-students/scholarships/adb-jsp",  # correct ADB-JSP page (old Tokyo Tech domain, not yet migrated)
+            "https://admissions.isct.ac.jp/en/013/graduate",   # IST grad admissions index
+            "https://www.isct.ac.jp/en/",                      # IST root fallback
+        ],
+        "preferred_domains": ["isct.ac.jp", "titech.ac.jp", "adb.org"],
+        "context_hint": (
+            "IMPORTANT CONTEXT for ADB-JSP Scholarship at Institute of Science Tokyo (IST):\n"
+            "IST (formerly Tokyo Institute of Technology / Tokyo Tech) merged with TMD in 2024. "
+            "The dedicated ADB-JSP scholarship page is on the OLD domain: "
+            "https://www.titech.ac.jp/english/international-student-exchange/prospective-students/scholarships/adb-jsp\n"
+            "However, titech.ac.jp uses a JavaScript SPA — scraped content has no dates.\n"
+            "The ADB-JSP process at IST: (1) Applicant applies to a specific IST graduate program for October enrollment, "
+            "(2) IST nominates eligible students to ADB after admission. "
+            "Application deadline is set per graduate school/program and is NOT a single published date. "
+            "If no specific date is found, set status='CLOSED' and note: deadlines vary by graduate program. "
+            "The Info URL should be: https://www.titech.ac.jp/english/international-student-exchange/prospective-students/scholarships/adb-jsp\n"
+        ),
+        "notes": (
+            "IST ADB-JSP: titech.ac.jp is the actual scholarship domain (legacy, pre-merger). "
+            "Both isct.ac.jp and titech.ac.jp are JS SPAs — no scrapable dates. "
+            "context_hint provides the LLM with correct Info URL and process description."
+        ),
     },
+
     "(ADB-JSP Scholarship) Keio University": {
-        "preferred_urls":    ["https://www.keio.ac.jp/en/"],
+        "preferred_query": "Keio University ADB-JSP scholarship application deadline 2026 2027 admissions graduate",
+        "preferred_urls": [
+            "https://www.keio.ac.jp/en/admissions/",            # main admissions hub (English)
+            "https://www.keio.ac.jp/en/",                       # root fallback
+            "https://www.adb.org/work-with-us/careers/japan-scholarship-program",  # ADB JSP overview
+        ],
         "preferred_domains": ["keio.ac.jp", "adb.org"],
-        "notes": "ADB-JSP at Keio University. Check English graduate admissions page.",
+        # context_hint: Keio has NO single ADB-JSP deadline page.
+        # Admission is per-graduate-school; the ADB-JSP documents are sent AFTER admission.
+        # Deadlines are embedded in each graduate school's application guide (PDF/HTML).
+        "context_hint": (
+            "IMPORTANT CONTEXT for Keio University ADB-JSP Scholarship:\n"
+            "Keio University does NOT publish a single ADB-JSP scholarship deadline. "
+            "The process is: (1) Applicant applies to a specific Keio graduate school for September enrollment, "
+            "(2) Keio sends ADB-JSP documents after admission. "
+            "Application deadlines are set per graduate school (e.g. Graduate School of System Design and "
+            "Management requires application in Period II or III for September intake). "
+            "If no specific date is found, set status='CLOSED' and note that deadlines vary by graduate school. "
+            "The Info URL should be the Keio admissions page: https://www.keio.ac.jp/en/admissions/\n"
+        ),
+        "notes": (
+            "ADB-JSP at Keio University — no single scholarship deadline page exists. "
+            "Each graduate school sets its own September intake application period. "
+            "context_hint explains this to the LLM so it doesn't hallucinate a single deadline. "
+            "adb.org returns 403 for the scraper UA — kept as preferred_domain but not injected as URL."
+        ),
     },
 }
 

@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sch_prototype")
 
 # Hardcoded scholarship name to test (change this to check different ones)
-TEST_SCHOLARSHIP_NAME = "(International Graduate Program (IGP) Special MEXT Scholarship) Hokkaido University"
+TEST_SCHOLARSHIP_NAME = "DAAD STEM Discipline"
 
 class CerebrasQuotaExceededException(Exception):
     pass
@@ -75,26 +75,74 @@ _UNI_TO_UNI_SKIP_PREFIXES = {
     "uni-funded",   # e.g. (Uni-Funded) Leiden University Excellence Scholarships
 }
 
+def _find_balanced_close(s: str) -> int:
+    """
+    Return the index of the ')' that BALANCES the '(' at s[0].
+    Returns -1 if the string doesn't start with '(' or is unbalanced.
+
+    Examples
+    --------
+    '(MEXT Scholarship) foo'
+        → 17  (first ')')
+
+    '(Intl Grad Program (IGP) Special MEXT Scholarship) Hokkaido'
+        → 50  (last ')', skipping the nested one after 'IGP')
+    """
+    if not s or s[0] != '(':
+        return -1
+    depth = 0
+    for i, ch in enumerate(s):
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1  # unbalanced
+
 def parse_scholarship_name(name: str) -> dict:
     """
-    Detects uni-to-uni naming pattern: (Scholarship Name) University Name
+    Detects uni-to-uni naming pattern: (Scholarship Body) University Name
+
+    Uses balanced-parenthesis tracking instead of a greedy/non-greedy regex so
+    that nested parens in either part are handled correctly:
+
+      '(MEXT Scholarship) Intl Grad Program (IGP) Special - Hokkaido'
+          scholarship = 'MEXT Scholarship'
+          university  = 'Intl Grad Program (IGP) Special - Hokkaido'
+
+      '(Intl Grad Program (IGP) Special MEXT Scholarship) Hokkaido Univ'
+          scholarship = 'Intl Grad Program (IGP) Special MEXT Scholarship'
+          university  = 'Hokkaido Univ'
 
     Returns:
       { "type": "centralized", "display_name": name }        → normal scholarship
-      { "type": "uni_to_uni",  "scholarship": "ANSO Scholarship",
-        "university": "UCAS",  "display_name": name }         → uni-specific entry
+      { "type": "uni_to_uni",  "scholarship": "...",
+        "university": "...",   "display_name": name }         → uni-specific entry
     """
-    match = _re.match(r'^\((.+?)\)\s+(.+)$', name.strip())
-    if match:
-        prefix = match.group(1).strip().lower()
-        if prefix not in _UNI_TO_UNI_SKIP_PREFIXES:
-            return {
-                "type":        "uni_to_uni",
-                "scholarship": match.group(1).strip(),
-                "university":  match.group(2).strip(),
-                "display_name": name,
-            }
-    return {"type": "centralized", "display_name": name}
+    s = name.strip()
+    if not s.startswith('('):
+        return {"type": "centralized", "display_name": name}
+
+    close_idx = _find_balanced_close(s)
+    if close_idx == -1:
+        return {"type": "centralized", "display_name": name}
+
+    scholarship = s[1:close_idx].strip()          # text between outer ( and )
+    rest        = s[close_idx + 1:].strip()       # text after the outer )
+
+    if not rest or not scholarship:
+        return {"type": "centralized", "display_name": name}
+
+    if scholarship.lower() in _UNI_TO_UNI_SKIP_PREFIXES:
+        return {"type": "centralized", "display_name": name}
+
+    return {
+        "type":         "uni_to_uni",
+        "scholarship":  scholarship,
+        "university":   rest,
+        "display_name": name,
+    }
 
 
 # ── B2: TRANSLATION HELPER ──────────────────────────────────────────────────
@@ -327,14 +375,34 @@ def clean_html(html_content: str) -> str:
             cleaned_lines.append(line)
     return "\n".join(cleaned_lines)
 
+# Official TLDs that universally serve HTTPS — proactively upgrade http:// links
+# to avoid ConnectTimeout on port 80 (common when a page has an old http:// href).
+_HTTPS_ONLY_TLDS = (
+    ".ac.jp", ".go.jp", ".go.kr", ".go.id", ".go.th", ".go.au",
+    ".ac.kr", ".ac.id", ".edu.au", ".gov", ".edu",
+)
+
+def _upgrade_to_https(url: str) -> str:
+    """Rewrite http:// to https:// for domains known to require HTTPS."""
+    if url.startswith("http://"):
+        domain = urllib.parse.urlparse(url).netloc.lower()
+        if any(domain.endswith(tld) for tld in _HTTPS_ONLY_TLDS):
+            upgraded = "https://" + url[7:]
+            logger.debug(f"HTTP→HTTPS upgrade: {url} → {upgraded}")
+            return upgraded
+    return url
+
 def fetch_webpage_content(url: str, retries: int = 2, retry_delay: int = 180) -> Optional[str]:
     """
     Fetches URL HTML content.
     - HTTP 429/403 or captcha blocks: retries with 3-min sleep (genuine rate limits).
     - SSL/connection errors: skips immediately without sleep (server refused us).
+    - http:// on official TLDs: auto-upgraded to https:// to avoid port-80 timeout.
     """
     if not url or not (url.startswith("http://") or url.startswith("https://")):
         return None
+    # Proactively upgrade http:// to https:// for official academic/govt domains
+    url = _upgrade_to_https(url)
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -443,6 +511,12 @@ def fetch_webpage_content(url: str, retries: int = 2, retry_delay: int = 180) ->
                 "HANDSHAKE", "forcibly closed", "10054", "10061", "RemoteDisconnected"
             ])
             if is_network_error:
+                # If the URL is http:// and it timed out/refused, try https:// once
+                # before giving up — many servers no longer listen on port 80.
+                if url.startswith("http://") and "ConnectTimeout" in err_type:
+                    https_url = "https://" + url[7:]
+                    logger.info(f"ConnectTimeout on http:// — retrying with https://: {https_url}")
+                    return fetch_webpage_content(https_url, retries=1, retry_delay=0)
                 logger.warning(f"Network error on {url} — skipping without retry sleep.")
                 return None
             # For unexpected errors only, retry with sleep if attempts remain
@@ -676,9 +750,17 @@ CANDIDATE REGISTRATION LINKS FOUND on webpages:
                 raise
     latency = time.time() - start_time
     
-    # Catch API rate-limiting or quota limit hits
-    if response.status_code == 429 or "RESOURCE_EXHAUSTED" in response.text or "quota" in response.text.lower() or "limit exceeded" in response.text.lower():
+    # Catch API rate-limiting or quota limit hits.
+    # IMPORTANT: Only inspect response.text for error keywords when the HTTP status
+    # is already non-OK. A 200 OK response contains the model's JSON output (which
+    # may legitimately contain words like "quota" from scholarship content, e.g.
+    # "special-quota.php") and must NEVER be inspected for API error keywords.
+    if response.status_code == 429:
         raise CerebrasQuotaExceededException(f"Cerebras API limit/quota hit: {response.status_code} - {response.text}")
+    if not response.ok:
+        err_text = response.text
+        if "RESOURCE_EXHAUSTED" in err_text or "quota" in err_text.lower() or "limit exceeded" in err_text.lower():
+            raise CerebrasQuotaExceededException(f"Cerebras API limit/quota hit: {response.status_code} - {err_text}")
         
     if not response.ok:
         raise RuntimeError(f"Llama API failed: {response.status_code} - {response.text}")
@@ -808,11 +890,21 @@ def run_comparison():
         search_query = sch_cfg["preferred_query"]
         logger.info(f"[CONFIG] Using preferred query: {search_query}")
     elif name_parsed["type"] == "uni_to_uni":
+        # Uni-to-uni programs often publish their page using the ADMISSION year
+        # (e.g. "admission in October 2027") rather than the application deadline year.
+        # Including both current year (deadline year) AND current+1 (admission year)
+        # helps search engines surface the live program page instead of stale news
+        # announcements about the previous application cycle.
+        # "university recommendation" is the official MEXT track name for uni-to-uni
+        # scholarships — university pages frequently use this phrase, making it a
+        # strong signal to surface official program pages over generic news articles.
+        _cur_year = datetime.datetime.now().year
+        _adm_year = _cur_year + 1  # admission cohort is typically one year ahead
         search_query = (
-            f"{name_parsed['scholarship']} {name_parsed['university']} "
-            f"2026 deadline application scholarship"
+            f"{name_parsed['university']} {name_parsed['scholarship']} "
+            f"university recommendation application {_cur_year} OR {_adm_year} deadline"
         )
-        logger.info(f"[UNI-TO-UNI] Auto query: {search_query}")
+        logger.info(f"[UNI-TO-UNI] Auto query (deadline={_cur_year}, admission={_adm_year}): {search_query}")
     else:
         # Default: scholarship name + year only — no country hardcoded.
         search_query = f"{sch_name} important date deadline {time.strftime('%Y')}"
@@ -841,67 +933,85 @@ def run_comparison():
         logger.info(f"[LOCKED] Skipping search engine. Locked URLs: {locked_urls}")
     else:
         # A3: search now returns (results, search_status)
+        urls_to_scrape = []  # initialize here — may be overridden by fallback or queue-builder below
         search_results, search_status = search_scholarship_with_retry(search_query)
 
         # A3: abort early with differentiated remark if search completely failed
+        # Exception: if preferred_urls are configured, fall through to scrape them
+        # even when the search engine is down (preferred_urls act as mini-locked mode).
         if not search_results:
-            remark_map = {
-                "NETWORK_FAILURE": (
-                    "[NETWORK FAILURE] Both DuckDuckGo and Yahoo were unreachable "
-                    "(SSL/connection error). No web context retrieved. "
-                    "Retry manually in a few minutes."
-                ),
-                "BLOCKED": (
-                    "[SEARCH BLOCKED] Search engines returned captcha/rate-limit. "
-                    "Wait ~5 minutes and re-run."
-                ),
-                "NO_RESULTS": (
-                    "[NO RESULTS] Search engines responded but returned 0 parseable "
-                    "result links. The scholarship name may need a config override in "
-                    "scholarship_config.py."
-                ),
-            }
-            remark = remark_map.get(search_status, "[UNKNOWN SEARCH FAILURE]")
-            logger.warning(f"Search failed ({search_status}). Sending failure report.")
-            processed_results.append({
-                "row_idx":       matched_row["row_idx"],
-                "search_status": search_status,
-                "verified_data": {
-                    "scholarship_name":           sch_name,
-                    "status":                     "UNKNOWN",
-                    "application_start_date":     None,
-                    "application_deadline":       None,
-                    "official_source_url":        None,
-                    "official_registration_url":  None,
-                    "supplementary_source_url":   None,
-                    "url_verification_fallback_used": True,
-                    "confidence_score":           0.0,
-                    "processing_method_detected": "Unknown",
-                    "remarks":                    remark,
+            fallback_preferred = sch_cfg.get("preferred_urls", [])
+            if fallback_preferred:
+                # Search failed but we have known-good URLs — scrape those instead
+                logger.warning(
+                    f"Search failed ({search_status}) but {len(fallback_preferred)} preferred_url(s) "
+                    f"configured — falling back to scraping preferred URLs only."
+                )
+                urls_to_scrape = [(u, "Config Preferred URL (search-failed fallback)") for u in fallback_preferred]
+                # Skip the normal queue-building below
+            else:
+                remark_map = {
+                    "NETWORK_FAILURE": (
+                        "[NETWORK FAILURE] Both DuckDuckGo and Yahoo were unreachable "
+                        "(SSL/connection error). No web context retrieved. "
+                        "Retry manually in a few minutes."
+                    ),
+                    "BLOCKED": (
+                        "[SEARCH BLOCKED] Search engines returned captcha/rate-limit. "
+                        "Wait ~5 minutes and re-run."
+                    ),
+                    "NO_RESULTS": (
+                        "[NO RESULTS] Search engines responded but returned 0 parseable "
+                        "result links. The scholarship name may need a config override in "
+                        "scholarship_config.py."
+                    ),
                 }
-            })
-            save_result_json(sch_name, model_name, search_status, processed_results)
-            send_scout_report_email(processed_results, quota_exceeded)
-            return
+                remark = remark_map.get(search_status, "[UNKNOWN SEARCH FAILURE]")
+                logger.warning(f"Search failed ({search_status}). Sending failure report.")
+                processed_results.append({
+                    "row_idx":       matched_row["row_idx"],
+                    "search_status": search_status,
+                    "verified_data": {
+                        "scholarship_name":           sch_name,
+                        "status":                     "UNKNOWN",
+                        "application_start_date":     None,
+                        "application_deadline":       None,
+                        "official_source_url":        None,
+                        "official_registration_url":  None,
+                        "supplementary_source_url":   None,
+                        "url_verification_fallback_used": True,
+                        "confidence_score":           0.0,
+                        "processing_method_detected": "Unknown",
+                        "remarks":                    remark,
+                    }
+                })
+                save_result_json(sch_name, model_name, search_status, processed_results)
+                send_scout_report_email(processed_results, quota_exceeded)
+                return
 
-        search_results = search_results or []
+        if not urls_to_scrape:  # only set by the fallback block above
+            search_results = search_results or []
+
 
         # Build scrape queue: preferred URLs first, then search results
-        preferred_entries = [
-            (u, "Config Preferred URL") for u in sch_cfg.get("preferred_urls", [])
-        ]
-        search_entries = [
-            (r["url"], "Search Result") for r in search_results[:5]
-        ]
-        # Deduplicate: don't re-scrape preferred URLs if search also returned them
-        preferred_set  = {u for u, _ in preferred_entries}
-        search_entries = [e for e in search_entries if e[0] not in preferred_set]
+        # (only runs when search succeeded — fallback path above already set urls_to_scrape)
+        if not urls_to_scrape:
+            preferred_entries = [
+                (u, "Config Preferred URL") for u in sch_cfg.get("preferred_urls", [])
+            ]
+            search_entries = [
+                (r["url"], "Search Result") for r in search_results[:5]
+            ]
+            # Deduplicate: don't re-scrape preferred URLs if search also returned them
+            preferred_set  = {u for u, _ in preferred_entries}
+            search_entries = [e for e in search_entries if e[0] not in preferred_set]
 
-        # Official-first ordering among search entries (keep existing logic)
-        official_entries = [(u, t) for u, t in search_entries if not is_news_domain(u)]
-        news_entries     = [(u, t) for u, t in search_entries if is_news_domain(u)]
+            # Official-first ordering among search entries (keep existing logic)
+            official_entries = [(u, t) for u, t in search_entries if not is_news_domain(u)]
+            news_entries     = [(u, t) for u, t in search_entries if is_news_domain(u)]
 
-        urls_to_scrape = preferred_entries + official_entries + news_entries
+            urls_to_scrape = preferred_entries + official_entries + news_entries
+
     # 2. Deep scraping & link extraction
     # Only from search results / preferred URLs — historical spreadsheet links are NOT scraped.
     scraped_pages = []
@@ -948,7 +1058,8 @@ def run_comparison():
             continue
             
         cleaned_text = clean_html(html)
-        truncated_text = cleaned_text[:5000]
+        _char_limit = sch_cfg.get("scrape_char_limit", 5000)
+        truncated_text = cleaned_text[:_char_limit]
 
         # B2: Translation sub-step for non-English pages
         if sch_cfg.get("needs_translation") and cleaned_text:
@@ -963,7 +1074,7 @@ def run_comparison():
                 )
                 translated   = translate_text(cleaned_text[:500], source_lang=lang_hint)
                 cleaned_text = f"[TRANSLATED EXCERPT]:\n{translated}\n\n[ORIGINAL]:\n{cleaned_text}"
-                truncated_text = cleaned_text[:5000]
+                truncated_text = cleaned_text[:_char_limit]
         
         links = extract_hyperlinks(html, url)
         candidates = filter_candidate_links(links, sch_name)
@@ -979,7 +1090,21 @@ def run_comparison():
         # Determine the domain of the current page for same-domain branching
         current_netloc = urllib.parse.urlparse(url).netloc.lower()
 
-        for sub_url in candidates["info"]:
+        # Sort candidate sub-links so the most scholarship-relevant URLs are
+        # branched into first, before the budget runs out on generic pages.
+        # Priority 0: path matches a standard branching keyword (e.g. /apply, /deadline)
+        # Priority 1: URL contains a scholarship-name word (e.g. "special" from "Special MEXT")
+        # Priority 2: everything else (official but generic, e.g. global.hokudai.ac.jp/)
+        _name_words = [w.lower() for w in sch_name.split() if len(w) > 3]
+        def _branch_priority(u: str) -> int:
+            p = urllib.parse.urlparse(u).path.lower()
+            if any(kw in p for kw in branching_keywords):
+                return 0
+            if any(w in u.lower() for w in _name_words):
+                return 1
+            return 2
+
+        for sub_url in sorted(candidates["info"], key=_branch_priority):
             if branching_count >= MAX_BRANCHES:
                 break
             if sub_url == url or sub_url in fetched_urls:
@@ -988,6 +1113,11 @@ def run_comparison():
             sub_parsed = urllib.parse.urlparse(sub_url)
             sub_netloc = sub_parsed.netloc.lower()
             sub_path = sub_parsed.path.lower()
+
+            # Skip binary files — PDFs/docs waste a branch slot and yield no text
+            if any(sub_path.endswith(ext) for ext in BINARY_EXTENSIONS):
+                logger.debug(f"Skipping binary sub-link: {sub_url}")
+                continue
 
             # Hard-skip known useless URL patterns and noise domains
             USELESS_PATH_PATTERNS = (
@@ -1015,8 +1145,13 @@ def run_comparison():
                 continue
 
             # Match keywords against the URL PATH only (not domain) to avoid
-            # substring false-positives from the domain name itself
-            if any(kw in sub_path for kw in branching_keywords):
+            # substring false-positives from the domain name itself.
+            # EXCEPTION: official-domain URLs that already passed filter_candidate_links
+            # are trusted regardless of path keywords. This covers pages whose paths
+            # use non-standard terms (e.g. "special-quota.php", "admissions.php")
+            # that don't appear in the generic branching keyword list.
+            passes_path_keywords = any(kw in sub_path for kw in branching_keywords)
+            if passes_path_keywords or is_official:
                 fetched_urls.add(sub_url)
                 logger.info(f"Following branching sub-link ({branching_count + 1}/{MAX_BRANCHES}): {sub_url}")
                 sub_html = fetch_webpage_content(sub_url)
@@ -1107,6 +1242,12 @@ No search engine was used. These pre-configured URLs are the designated authorit
   - These are the definitive sources the operator has verified for this scholarship.
 """
 
+    # Config-injected context hint — used when the page content is truncated or buried
+    # (e.g. CMK: date section is past the 5,000-char limit due to privacy modal HTML above it).
+    # Appended to the prompt so the LLM has the known schedule even if scraping misses it.
+    if sch_cfg.get("context_hint"):
+        uni_context_note += f"\n\nADDITIONAL CONTEXT (operator-verified):\n{sch_cfg['context_hint']}\n"
+
     try:
         verified_data = verify_scholarship_llama(
             scholarship_name=matched_row["scholarship_name"],
@@ -1189,11 +1330,11 @@ No search engine was used. These pre-configured URLs are the designated authorit
                 verified_data["application_start_date"] = _start_dt.isoformat()
                 verified_data["remarks"] = (
                     (verified_data.get("remarks") or "") +
-                    " [Start date estimated: only deadline found — start = deadline − 90 days.]"
+                    " [Start date estimated: only deadline found - start = deadline - 90 days.]"
                 ).strip()
                 logger.info(
                     f"Start date estimated: {_start_dt.isoformat()} "
-                    f"(deadline − 90 days from {_end})"
+                    f"(deadline - 90 days from {_end})"
                 )
             except ValueError:
                 pass  # unparseable end_date — leave start as None

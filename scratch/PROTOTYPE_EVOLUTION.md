@@ -271,6 +271,61 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 
 ---
 
+## 🩹 Phase 5: API Error Handling & False-Positive Quota Detection (June 9, 2026)
+
+### Problems Found
+
+| Symptom | Root Cause |
+|---------|-----------|
+| Successful runs on uni-to-uni scholarships raise `CerebrasQuotaExceededException` | The API error detection scanned the entire response body for the word `"quota"`. In successful runs for scholarships containing `"quota"` or linking to `"special-quota"` pages, this text was mirrored back in the valid LLM response, falsely triggering the quota exhaustion handler. |
+
+### Changes Implemented
+
+#### 43. Gated Quota Keyword Scan behind Non-OK HTTP Status
+* **What changed**: Modified the rate-limit/quota-exceeded checks in `verify_scholarship_llama()` to:
+  1. Raise `CerebrasQuotaExceededException` immediately if the response status code is `429`.
+  2. For other status codes, check `not response.ok` before searching `response.text` for `"RESOURCE_EXHAUSTED"`, `"quota"`, or `"limit exceeded"`.
+* **Why**: Successful LLM responses (status `200 OK`) should never be scanned for error keywords because the content returned by the model can legitimately contain those terms (e.g. university student seat quotas, URL paths with `"quota"`, etc.).
+* **Trigger scholarship**: `TEST_SCHOLARSHIP_NAME = "(International Graduate Program (IGP) Special MEXT Scholarship) Hokkaido University"` (a uni-to-uni example that was failing due to scraped content references to `"IGP special quota"`).
+
+#### 45. Greedy Regex in `parse_scholarship_name()` (Bug Fix)
+* **What changed**: The regex `r'^\((.+?)\)\s+(.+)$'` (non-greedy) was changed to `r'^\((.+)\)\s+(.+)$'` (greedy).
+* **Why**: The non-greedy `(.+?)` stops at the **first** `)` it encounters. For a name like `(International Graduate Program (IGP) Special MEXT Scholarship) Hokkaido University`, it stopped at the `)` after `IGP`, giving:
+  - `scholarship = "International Graduate Program (IGP"` ❌
+  - `university  = "Special MEXT Scholarship) Hokkaido University"` ❌
+  
+  The greedy version correctly matches the **outermost** `)`:
+  - `scholarship = "International Graduate Program (IGP) Special MEXT Scholarship"` ✅
+  - `university  = "Hokkaido University"` ✅
+* **Impact**: The broken parse produced a mangled search query, causing Yahoo to return irrelevant results. This bug affected every uni-to-uni scholarship whose scholarship body name contains nested parentheses.
+
+#### 46. Official-Domain Branching without Path Keyword Requirement
+* **What changed**: The branching guard was changed from `if passes_path_keywords` to `if passes_path_keywords or is_official`. Official `.ac.jp`, `.go.jp`, `.edu`, etc. URLs that already cleared `filter_candidate_links` are now branched into even if their URL path doesn't contain a standard keyword (e.g. `special-quota.php` has no standard term like `/apply` or `/deadline`).
+* **Why**: The correct Hokkaido IGP page `special-quota.php` was being silently skipped because `"special-quota"` didn't match any branching keyword, even though the domain is an official `.ac.jp` university domain.
+
+#### 47. Priority-Sorted Branching Queue
+* **What changed**: Before iterating `candidates["info"]` for branching, the list is now sorted by a 3-tier priority key:
+  - **Priority 0**: URL path matches a standard branching keyword (`/apply`, `/deadline`, etc.)
+  - **Priority 1**: URL contains a scholarship-name word (e.g. `"special"` from `"Special MEXT"`)
+  - **Priority 2**: All other allowed official/same-domain URLs
+* **Why**: The branching budget (4 slots) was being consumed by generic pages (`moodle.hokudai.ac.jp`, `global.hokudai.ac.jp`, `pharm.hokudai.ac.jp`) before reaching the most-relevant URL (`altair.sci.hokudai.ac.jp/grad/igpoverview/special-quota.php`). With priority sorting, the program page is now fetched first.
+
+#### 48. Binary File Skip in Branching Sub-links
+* **What changed**: Added a binary extension check (`BINARY_EXTENSIONS`) inside the branching loop, mirroring the same check that already existed in the outer scraping loop.
+* **Why**: PDF links (e.g. `IGP-MEXTscholarship_leaflet2025.pdf`) were consuming branch slots. PDFs return no usable text, so fetching them wasted one of the 4 available branch slots on every run.
+
+#### 49. HTTP→HTTPS Upgrade for Official TLDs
+* **What changed**: Added `_upgrade_to_https()` helper and `_HTTPS_ONLY_TLDS` constant. `fetch_webpage_content()` now:
+  1. **Proactively** rewrites `http://` to `https://` for domains ending in `.ac.jp`, `.go.jp`, `.go.kr`, `.edu`, `.gov`, etc. before making any request.
+  2. **Reactively** retries with `https://` when a `ConnectTimeout` hits an `http://` URL (for unlisted domains).
+* **Why**: Old HTML pages sometimes contain `http://` links that were valid years ago. Modern academic/government servers no longer listen on port 80, so these links cause `ConnectTimeout` at port 80. The `altair.sci.hokudai.ac.jp` link on the `lfsci.hokudai.ac.jp` news page was `http://`, causing every attempt to time out.
+
+#### 50. Unicode Fix in Start Date Estimation Remark
+* **What changed**: Replaced `−` (U+2212, mathematical minus) with plain ASCII `-` in the start date estimation remark string and logger call.
+* **Why**: The `−` character is not encodable in Windows cp1252 (the default PowerShell console encoding), causing `UnicodeEncodeError` and crashing the print statement at line 1251.
+
+---
+
 ## 🎯 Current Success State
 
 | Scholarship | Expected Status | Notes |
@@ -278,10 +333,10 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 | GKS (Global Korea Scholarship) | CLOSED | Validated Phase 3 |
 | Zuyd ZES - Reguler | CLOSED | Validated Phase 3 |
 | Beasiswa Indonesia Bangkit (BIB) LPDP | CLOSED | Validated Phase 3 |
+| **(IGP Special MEXT Scholarship) Hokkaido University** | **OPEN** | **✅ Fully validated Phase 5 — correct page, correct 2026 dates, confidence 1.0** |
 | All batch test passing (18+ scholarships) | Various | Validated Phase 4 batch run |
 | MEXT, GKS, GOI-IES, Kazakhstan | Correct source | Config-driven, pending re-test |
 | DAAD STEM | Correct deep link | Config-driven, pending re-test |
 | Inpex / BIM / Sultan Qaboos / HDR | `⚡ NET ERR` cell | Failure mode now visible, pending re-test |
 
 > ⚠️ **Re-testing required** after Phase 4 changes for all Phase B config entries: MEXT, GKS, GOI-IES, Kazakhstan, DAAD, Hyundai CMK, LPDP, ANSO, ADB-JSP.
-
