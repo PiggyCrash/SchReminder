@@ -28,9 +28,11 @@ class GoogleSheetsConnector:
         
         # Exact column mapping for 'Scholarship List'
         self.expected_inputs = {
+            "note":             ["Note"],                                                                         # Col B
             "scholarship_name": ["Name", "Scholarship Name", "Scholarship"],
-            "active_status": ["Status"],
-            "country_region": ["Country/Region", "Country", "Region"],
+            "active_status":    ["Status"],
+            "verified":         ["Verified"],                                                                     # Col D
+            "country_region":   ["Country/Region", "Country", "Region"],
             "historical_method": ["Reg. Path", "Processing Method (Historical)", "Processing Method", "Method"],
             "historical_info_link": ["Info Link", "Info Link (Historical)", "Link Info", "Historical Info Link"],
             "historical_reg_link": ["Reg. Link", "Registration Link (Historical)", "Link Daftar", "Historical Registration Link"],

@@ -179,3 +179,109 @@ With the robust prototyping upgrades, the scouting engine has been successfully 
 3. **Beasiswa Indonesia Bangkit (BIB) LPDP**: Correctly verified as `CLOSED` (original dates 2025-03-28 to 2025-06-07). The URL Hallucination Guard successfully intercepted a hallucinated LPDP registration path and reverted it to the historical link.
 
 > ⚠️ **Re-testing required** after Phase 3 changes for: Stipendium Hungaricum, MEXT, GKS, ARICE Romania, Akebono Foundation.
+
+---
+
+## 🚀 Phase 4: Robustness, Config-Driven Scraping & Uni-to-Uni Schema
+
+### Design Principles
+> *"Failures must be distinguishable. Wrong source is worse than no source. Per-scholarship knowledge belongs in code, not in the engineer's head."*
+
+After a full batch test of ~30 scholarships, three distinct failure modes were identified that were previously all surfacing as identical `"No web context..."` remarks. Phase 4 addresses all three root causes.
+
+### Problems Found (triggering this phase)
+
+| Symptom | Root Cause |
+|---------|-----------|
+| Inpex, BIM, Sultan Qaboos, HDR — all `None` result, indistinguishable | `NETWORK_FAILURE` silently coerced to generic remark. Could not tell if it was network down or empty results |
+| EGYAID — intermittent `None` on first run, OK on second | Transient DDG/Yahoo failure with no retry after wait |
+| MEXT always gets `studyinjapan.go.jp` (wrong, global portal) | Generic search query; Indonesian embassy page never in top 5 results |
+| GKS gets Korean-language portal instead of Indonesia-specific dates | Same — wrong search result bias |
+| GOI-IES / Kazakhstan — zero results or wrong language | Low ranking + non-English page; no language fallback |
+| DAAD STEM — news article URL instead of DB deep link | Param-based URL never indexed by search engines |
+| Hyundai CMK — month-range dates (Dec-Jan) not parsed | LLM had no instruction for month-range inference |
+| Only end-date found → status shows CLOSED even if open | No start-date estimation logic |
+| Status=T, Verified=F wasting search/LLM API calls | No bypass path for manually-confirmed scholarships |
+
+### Changes Implemented
+
+#### 25. Result Persistence — `/result` JSON Folder (A1)
+* **What changed**: `save_result_json()` helper writes one timestamped JSON file per run to `scratch/result/`. Called on every exit path — success, failure, bypass.
+* **Why**: No history existed between runs. Impossible to track regression or compare results.
+
+#### 26. Start Date Estimation (A2)
+* **What changed**: After LLM call, if `application_start_date` is `None` but `application_deadline` is set, Python subtracts 90 days and fills the start date. Appends `[Start date estimated...]` to remarks.
+* **Why**: Many scholarship pages only publish the deadline. Status was showing `CLOSED` for potentially-open scholarships.
+
+#### 27. `search_status` Enum (A3)
+* **What changed**: `search_scholarship_with_retry()` now returns `(results, search_status)` tuple. Values: `SUCCESS / NETWORK_FAILURE / BLOCKED / NO_RESULTS`.
+* **Why**: Previously all failures looked the same. Now the remark text and email cell colour are specific to the failure type.
+
+#### 28. Bonus Retry Round (A3)
+* **What changed**: After both DDG and Yahoo fail in round 1, sleep `60 ± 5s` then retry the full DDG → Yahoo sequence once more before giving up.
+* **Why**: Transient failures (EGYAID) were failing permanently when a short wait would have recovered them.
+
+#### 29. Differentiated Remark Text (A3)
+* **`NETWORK_FAILURE`**: `[NETWORK FAILURE] Both DuckDuckGo and Yahoo were unreachable...`
+* **`BLOCKED`**: `[SEARCH BLOCKED] Search engines returned captcha/rate-limit...`
+* **`NO_RESULTS`**: `[NO RESULTS] Search engines responded but returned 0 parseable result links...`
+
+#### 30. Email Cell Colour per Failure Mode (A3)
+* Grey `⚡ NET ERR` for `NETWORK_FAILURE`
+* Dark orange `🚫 BLOCKED` for `BLOCKED`
+* Light grey `❓ NO DATA` for `NO_RESULTS`
+* Purple `✅ VERIFIED` for `BYPASS`
+
+#### 31. T+F Bypass Path (A4)
+* **What changed**: Before search, checks Col C (`Status`) and Col D (`Verified`). If `T + F`, reads Col B, G, H, I, J from the sheet and emails them directly — skipping search and LLM entirely.
+* **Why**: Manually-verified scholarships were wasting API quota on unnecessary search calls.
+
+#### 32–33. Col B (`Note`) and Col D (`Verified`) added to `col_map` (A4)
+* **What changed**: `google_sheets.py` `expected_inputs` now includes `"note": ["Note"]` and `"verified": ["Verified"]`.
+
+#### 34. Per-Scholarship Config Table — `scholarship_config.py` (B1)
+* **What changed**: New file `scratch/scholarship_config.py` with `SCHOLARSHIP_CONFIG` dict and `get_scholarship_config()` lookup function.
+* **Entries**: MEXT, GKS, GOI-IES, GO-PSP, Kazakhstan, MTCP, DAAD STEM, DAAD EPOS, Hyundai CMK, LPDP Tahap 1 & 2, ANSO UCAS/USTC, ADB-JSP IST/Keio.
+* **Why**: Wrong-source bias is best fixed by injecting the correct URL directly — not by changing LLM prompts.
+
+#### 35. Config-Driven Scraping (B2)
+* **What changed**: `run_comparison()` calls `get_scholarship_config()` before building the search query. `preferred_urls` are front-loaded in `urls_to_scrape` ahead of search results. `preferred_query` replaces the auto-generated query.
+
+#### 36. Translation Sub-Step (B2)
+* **What changed**: After `clean_html()`, if `needs_translation: True` in config and ASCII ratio < 5%, calls MyMemory API to translate the first 500 chars. Prepends `[TRANSLATED EXCERPT]` to cleaned text.
+* **Why**: Kazakhstan Bolashak site defaults to Kazakh/Russian. LLM needs English context.
+
+#### 37. Uni-to-Uni Schema — `parse_scholarship_name()` (B3a)
+* **What changed**: New helper function detects `(Scholarship Name) University Name` pattern. Returns `uni_to_uni` type or `centralized` type. Blocklist `_UNI_TO_UNI_SKIP_PREFIXES` handles `(Uni-Funded)` false positives.
+
+#### 38. Uni-to-Uni LLM Context Injection (B3b)
+* **What changed**: When `parsed["type"] == "uni_to_uni"`, a `uni_context_note` block is prepended to the user prompt, instructing the LLM to prioritise the university's own page dates and put scholarship body dates in remarks.
+
+#### 39. Uni-to-Uni Email Badge (B3c)
+* **What changed**: Scholarship name cell in email gets a purple `UNI-TO-UNI` span tag for entries detected as uni-to-uni.
+
+#### 40. `date_precision` Field + Monthly Inference Rule (C1)
+* **What changed**: System prompt adds field #12 (`date_precision`) with values `exact / monthly / quarterly / unknown`. Month-range sources (e.g. "Dec–Jan") now get explicit inference rules: start = first of month, end = last of month, nearest upcoming year.
+
+#### 41. Email `~` Prefix for Estimated Dates (C1)
+* **What changed**: Email renderer reads `date_precision`. If `monthly` or `quarterly`, prefixes both date cells with `~`.
+
+#### 42. Source Authority Hierarchy (C2)
+* **What changed**: System prompt adds an explicit 6-level authority hierarchy. Embassy/consulate > ministry/agency > foundation > university > study portal > news (forbidden). Contradicting sources: higher priority wins.
+
+---
+
+## 🎯 Current Success State
+
+| Scholarship | Expected Status | Notes |
+|-------------|-----------------|-------|
+| GKS (Global Korea Scholarship) | CLOSED | Validated Phase 3 |
+| Zuyd ZES - Reguler | CLOSED | Validated Phase 3 |
+| Beasiswa Indonesia Bangkit (BIB) LPDP | CLOSED | Validated Phase 3 |
+| All batch test passing (18+ scholarships) | Various | Validated Phase 4 batch run |
+| MEXT, GKS, GOI-IES, Kazakhstan | Correct source | Config-driven, pending re-test |
+| DAAD STEM | Correct deep link | Config-driven, pending re-test |
+| Inpex / BIM / Sultan Qaboos / HDR | `⚡ NET ERR` cell | Failure mode now visible, pending re-test |
+
+> ⚠️ **Re-testing required** after Phase 4 changes for all Phase B config entries: MEXT, GKS, GOI-IES, Kazakhstan, DAAD, Hyundai CMK, LPDP, ANSO, ADB-JSP.
+

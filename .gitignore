@@ -21,6 +21,8 @@ scout_run.log
 *.sln
 *.swp
 
+/scratch/result
+
 # Excel files
 # Master Program Application Tracker.xlsx
 # (Uncomment the line above if you want to ignore spreadsheet data files)

@@ -4,10 +4,14 @@ sys.path.insert(0, 'c:/Work/schreminder')
 
 import time
 import json
+import re
+import random
+import datetime
 import logging
 import requests
 import urllib.parse
-from typing import Dict, Any, Optional, List
+from datetime import date, timedelta
+from typing import Dict, Any, Optional, List, Tuple
 from bs4 import BeautifulSoup
 
 try:
@@ -32,10 +36,82 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sch_prototype")
 
 # Hardcoded scholarship name to test (change this to check different ones)
-TEST_SCHOLARSHIP_NAME = "Australia Awards Scholarship (AAS)"
+TEST_SCHOLARSHIP_NAME = "(International Graduate Program (IGP) Special MEXT Scholarship) Hokkaido University"
 
 class CerebrasQuotaExceededException(Exception):
     pass
+
+
+# ── A1: RESULT PERSISTENCE ───────────────────────────────────────────────────
+def save_result_json(scholarship_name: str, model_used: str,
+                     search_status: str, processed_results: list) -> None:
+    """Saves the run result to scratch/result/ as a timestamped JSON file."""
+    results_dir = os.path.join("c:/Work/schreminder/scratch/result")
+    os.makedirs(results_dir, exist_ok=True)
+
+    slug = re.sub(r'[^a-z0-9_]', '_', scholarship_name.lower().strip())[:40]
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{ts}_{slug}.json"
+    filepath = os.path.join(results_dir, filename)
+
+    payload = {
+        "run_ts":           datetime.datetime.now().isoformat(),
+        "scholarship_name": scholarship_name,
+        "model_used":       model_used,
+        "search_status":    search_status,
+        "results":          processed_results,
+    }
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    logger.info(f"Result saved → {filepath}")
+
+
+# ── B3a: UNI-TO-UNI NAME PARSER ───────────────────────────────────────────────
+import re as _re
+
+# Parenthesised prefixes that are category tags, NOT scholarship body names.
+# Entries starting with these are treated as centralized scholarships.
+_UNI_TO_UNI_SKIP_PREFIXES = {
+    "uni-funded",   # e.g. (Uni-Funded) Leiden University Excellence Scholarships
+}
+
+def parse_scholarship_name(name: str) -> dict:
+    """
+    Detects uni-to-uni naming pattern: (Scholarship Name) University Name
+
+    Returns:
+      { "type": "centralized", "display_name": name }        → normal scholarship
+      { "type": "uni_to_uni",  "scholarship": "ANSO Scholarship",
+        "university": "UCAS",  "display_name": name }         → uni-specific entry
+    """
+    match = _re.match(r'^\((.+?)\)\s+(.+)$', name.strip())
+    if match:
+        prefix = match.group(1).strip().lower()
+        if prefix not in _UNI_TO_UNI_SKIP_PREFIXES:
+            return {
+                "type":        "uni_to_uni",
+                "scholarship": match.group(1).strip(),
+                "university":  match.group(2).strip(),
+                "display_name": name,
+            }
+    return {"type": "centralized", "display_name": name}
+
+
+# ── B2: TRANSLATION HELPER ──────────────────────────────────────────────────
+def translate_text(text: str, source_lang: str = "auto", target_lang: str = "en") -> str:
+    """Translates a text snippet via MyMemory API (free, no key needed, ~500 chars/call)."""
+    try:
+        resp = requests.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": text, "langpair": f"{source_lang}|{target_lang}"},
+            timeout=10
+        )
+        if resp.ok:
+            return resp.json().get("responseData", {}).get("translatedText", text)
+    except Exception as e:
+        logger.warning(f"Translation failed ({e}). Using original text.")
+    return text
+
 
 def clean_bing_url(raw_url: str) -> str:
     if not raw_url:
@@ -136,107 +212,108 @@ def perform_bing_fallback_raw(query: str, max_results: int = 5) -> Optional[List
             return None
     return None
 
-def search_scholarship_with_retry(scholarship_name: str, max_results: int = 5, retries: int = 3, retry_delay: int = 180) -> Optional[List[Dict[str, str]]]:
-    """
-    Searches for scholarship on DuckDuckGo and retrieves top results.
-    - Captcha/rate-limit (HTTP block): retries with 3-min sleep, then Bing fallback.
-    - SSL/connection errors: immediately tries Bing fallback (no sleep needed).
-    - Falls back to Bing Search on any terminal failure.
-    """
-    # If the caller already built a specific query (contains year or deadline), use it directly.
-    # Otherwise append a generic suffix to help search engines find the right pages.
-    already_specific = any(kw in scholarship_name.lower() for kw in ["2026", "2025", "deadline", "indonesia", "timeline"])
-    if already_specific:
-        query = scholarship_name.strip()
-    else:
-        query = f"{scholarship_name} scholarship deadline timeline 2026"
+# ── A3: Internal DDG + Yahoo helpers (called by the main retry loop) ─────────
+def _try_duckduckgo(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
+    """Attempts a single DuckDuckGo search. Returns results list or None on failure.
+    Raises network exceptions so the caller can classify them."""
     url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9',
     }
-    
-    for attempt in range(1, retries + 1):
+    response = requests.get(url, headers=headers, timeout=15)  # may raise — let caller catch
+
+    if not response.ok:
+        logger.warning(f"DuckDuckGo HTTP {response.status_code}")
+        return None  # blocked / bad status
+    if any(kw in response.text for kw in ["ddg-captcha", "ddg-lms"]):
+        logger.warning("DuckDuckGo returned captcha/rate-limit page.")
+        return None
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+    results = []
+    for div in soup.find_all('div', class_='result')[:max_results]:
+        title_a = div.find('a', class_='result__url') or div.find('a', class_='result__title')
+        if not title_a:
+            continue
+        title = title_a.get_text(strip=True)
+        href  = title_a.get('href', '')
+        if 'uddg=' in href:
+            try:
+                parsed_href = urllib.parse.urlparse(href)
+                qs = urllib.parse.parse_qs(parsed_href.query)
+                if 'uddg' in qs:
+                    href = qs['uddg'][0]
+            except Exception:
+                pass
+        elif href.startswith('//'):
+            href = 'https:' + href
+        snippet_div = div.find(class_='result__snippet')
+        snippet = snippet_div.get_text(strip=True) if snippet_div else ""
+        if title and href:
+            results.append({"title": title, "url": href, "snippet": snippet})
+
+    if not results:
+        logger.warning("DuckDuckGo returned 0 parseable results.")
+        return None
+    logger.info(f"DuckDuckGo: harvested {len(results)} results.")
+    return results
+
+
+def _try_yahoo(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
+    """Yahoo search fallback (same logic as perform_bing_fallback_raw, renamed for clarity)."""
+    return perform_bing_fallback_raw(query, max_results)
+
+
+def search_scholarship_with_retry(query: str, max_results: int = 5) -> Tuple[Optional[List[Dict[str, str]]], str]:
+    """
+    A3: Two-round search with bonus retry and classified search_status.
+
+    Returns (results, search_status) where search_status is one of:
+      'SUCCESS'          - >= 1 result retrieved
+      'NETWORK_FAILURE'  - connection/SSL error on both engines both rounds
+      'BLOCKED'          - captcha/rate-limit on both engines both rounds
+      'NO_RESULTS'       - engines responded but returned 0 parseable items
+    """
+    last_error_type = "NETWORK_FAILURE"
+
+    for round_num in range(1, 3):  # Round 1, then Round 2 after sleep
+        logger.info(f"Search round {round_num}/2 for: '{query}'")
+
+        # --- try DuckDuckGo ---
         try:
-            logger.info(f"Searching DuckDuckGo (Attempt {attempt}/{retries}) for: '{scholarship_name}'")
-            response = requests.get(url, headers=headers, timeout=15)
-            
-            is_blocked = False
-            if not response.ok:
-                is_blocked = True
-            elif "ddg-captcha" in response.text or "robot" in response.text or "ddg-lms" in response.text:
-                is_blocked = True
-                
-            if is_blocked:
-                logger.warning("DuckDuckGo returned captcha/rate-limiting block. Attempting Bing Search...")
-                bing_results = perform_bing_fallback_raw(query, max_results)
-                if bing_results:
-                    return bing_results
-                    
-                # If Bing also fails, wait and retry DuckDuckGo
-                if attempt < retries:
-                    logger.info(f"DuckDuckGo and Bing blocked. Sleeping for {retry_delay} seconds (3 mins) before retry...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    logger.error("DuckDuckGo and Bing search blocked after all retry attempts.")
-                    return None
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            results = []
-            result_divs = soup.find_all('div', class_='result')
-            for div in result_divs[:max_results]:
-                title_a = div.find('a', class_='result__url') or div.find('a', class_='result__title')
-                if not title_a:
-                    continue
-                title = title_a.get_text(strip=True)
-                href = title_a.get('href', '')
-                
-                if 'uddg=' in href:
-                    try:
-                        parsed_href = urllib.parse.urlparse(href)
-                        queries = urllib.parse.parse_qs(parsed_href.query)
-                        if 'uddg' in queries:
-                            href = queries['uddg'][0]
-                    except Exception:
-                        pass
-                elif href.startswith('//'):
-                    href = 'https:' + href
-                    
-                snippet_div = div.find(class_='result__snippet')
-                snippet = snippet_div.get_text(strip=True) if snippet_div else ""
-                
-                if title and href:
-                    results.append({
-                        "title": title,
-                        "url": href,
-                        "snippet": snippet
-                    })
-            return results
+            ddg_result = _try_duckduckgo(query, max_results)
+            if ddg_result:
+                return (ddg_result, "SUCCESS")
+            # Got a response but 0 results (captcha or empty)
+            last_error_type = "BLOCKED"
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            logger.warning(f"DDG network error (round {round_num}): {type(e).__name__}: {e}")
+            last_error_type = "NETWORK_FAILURE"
         except Exception as e:
-            err_str = str(e)
-            err_type = type(e).__name__
-            logger.error(f"Search attempt raised exception ({err_type}): {err_str}")
-            # SSL / connection errors: the host is unreachable, sleep won't help.
-            # Skip the retry sleep entirely and go straight to Bing fallback.
-            is_network_error = any(kw in err_type or kw in err_str for kw in [
-                "SSL", "Connection", "timeout", "Timeout", "HANDSHAKE"
-            ])
-            if is_network_error:
-                logger.warning("Network/SSL error — skipping retry sleep, immediately trying Bing fallback...")
-                bing_results = perform_bing_fallback_raw(query, max_results)
-                if bing_results:
-                    return bing_results
-                logger.error("Bing fallback also failed after DuckDuckGo network error.")
-                return None
-            # For other errors, retry with sleep if attempts remain
-            if attempt < retries:
-                logger.info(f"Sleeping for {retry_delay} seconds before retry...")
-                time.sleep(retry_delay)
-            else:
-                return None
-    return None
+            logger.warning(f"DDG unexpected error (round {round_num}): {e}")
+            last_error_type = "NETWORK_FAILURE"
+
+        # --- try Yahoo fallback ---
+        yahoo_result = _try_yahoo(query, max_results)
+        if yahoo_result:
+            return (yahoo_result, "SUCCESS")
+
+        # --- both failed this round ---
+        if round_num == 1:
+            sleep_s = 60 + random.uniform(-5, 5)
+            logger.info(
+                f"Both search engines failed (round 1). "
+                f"Sleeping {sleep_s:.0f}s then retrying (round 2)..."
+            )
+            time.sleep(sleep_s)
+
+    # All retries exhausted
+    logger.error(f"All search attempts failed. Final status: {last_error_type}")
+    return (None, last_error_type)
 
 def clean_html(html_content: str) -> str:
     soup = BeautifulSoup(html_content, "html.parser")
@@ -268,10 +345,59 @@ def fetch_webpage_content(url: str, retries: int = 2, retry_delay: int = 180) ->
             logger.info(f"Fetching URL (Attempt {attempt}/{retries}): {url}")
             response = requests.get(url, headers=headers, timeout=15)
             
-            # 403 = permanently blocked (firewall/WAF) — sleeping won't help, skip immediately.
-            # 429 = genuine rate limit — sleeping and retrying is the right call.
+            # 403 = WAF/bot-detection block. Before giving up, rotate through realistic
+            # browser User-Agent strings — government sites often block only the default UA.
             if response.status_code == 403:
-                logger.warning(f"403 Forbidden on {url} — permanently blocked. Skipping immediately.")
+                stealth_ua_pool = [
+                    # Chrome on Windows (most common)
+                    (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'https://www.google.com/'
+                    ),
+                    # Safari on macOS
+                    (
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 '
+                        '(KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
+                        'https://www.google.com/'
+                    ),
+                    # Firefox on Windows
+                    (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) '
+                        'Gecko/20100101 Firefox/125.0',
+                        'https://www.google.co.id/'
+                    ),
+                    # Edge on Windows
+                    (
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+                        'https://www.bing.com/'
+                    ),
+                ]
+                logger.warning(f"403 on {url} — rotating User-Agent to bypass bot filter...")
+                for ua_str, referer in stealth_ua_pool:
+                    try:
+                        stealth_headers = {
+                            'User-Agent': ua_str,
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Referer': referer,
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'cross-site',
+                            'Cache-Control': 'no-cache',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                        }
+                        r2 = requests.get(url, headers=stealth_headers, timeout=15)
+                        if r2.ok:
+                            logger.info(f"UA rotation succeeded for {url} (status {r2.status_code})")
+                            return r2.text
+                        logger.warning(f"UA rotation attempt failed: status {r2.status_code}")
+                    except Exception as ua_err:
+                        logger.warning(f"UA rotation attempt error: {ua_err}")
+                logger.warning(f"403 Forbidden on {url} — all UA rotation attempts failed. Skipping.")
                 return None
 
             is_blocked = False
@@ -410,7 +536,8 @@ def verify_scholarship_llama(
     scraped_web_text: str,
     candidate_info_links: List[str],
     candidate_reg_links: List[str],
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    uni_context_note: str = "",          # B3b: injected for uni-to-uni entries
 ) -> Dict[str, Any]:
     """
     Calls the OpenAI-compatible endpoint (Cerebras/Llama) using requests.
@@ -466,12 +593,44 @@ SYSTEM LOGIC & ANALYSIS STRATEGY:
    - If no explicit deadline is found in the scraped text → ASSUME status = 'CLOSED' (conservative). Do NOT output 'OPEN' without an explicit future deadline date. This is a hard rule.
    - NEVER output 'OPEN' if today's date is after the deadline. This is a hard rule.
 6. DATE PRIORITY RULE: If the scraped page text contains explicit, precise dates (e.g. '2026-11-01 to 2027-01-31'), use those as ground truth. Only use context clues or estimates if NO explicit dates appear anywhere in the scraped content.
+
+FIELD 12 — date_precision (REQUIRED):
+12. "date_precision": Strictly one of: 'exact' | 'monthly' | 'quarterly' | 'unknown'
+    - 'exact'     : Specific YYYY-MM-DD dates found in the source
+    - 'monthly'   : Only month names or ranges stated (e.g. "December - January")
+    - 'quarterly' : Quarter or semester mentioned (e.g. "Q1 2026", "Semester 1")
+    - 'unknown'   : No date information found at all
+
+DATE INFERENCE FOR MONTH-RANGE SOURCES:
+If dates are stated as month name ranges only (e.g. "December - January" or "Jun - Jul"):
+  - application_start_date = first day of start month  -> YYYY-MM-01
+  - application_deadline   = last day of end month     -> use calendar (Jan=31, Apr=30, Feb=28, etc.)
+  - Use the nearest upcoming cycle year. Example: if today is June 2026 and the source
+    says "Dec - Jan", use Dec 2026 - Jan 2027.
+  - Set date_precision = 'monthly'
+For quarters: infer first/last day of the quarter. Set date_precision = 'quarterly'.
+
+SOURCE AUTHORITY HIERARCHY — apply in strict descending priority:
+1. Official embassy/consulate page for the applicant's home country
+   (e.g. id.emb-japan.go.jp for Indonesian applicants to MEXT)
+2. Issuing government ministry or national agency
+   (e.g. niied.go.kr, mext.go.jp, hea.ie, bolashak.gov.kz)
+3. Official scholarship foundation website
+   (e.g. gksscholarship.com, chevening.org, cmkfoundation-globalscholarship.org)
+4. Official university or institution admission page
+   (for uni-to-uni scholarships: this becomes PRIORITY #1 — see UNI-TO-UNI note if present)
+5. Study-abroad portals (e.g. studyinjapan.go.jp, studyinkorea.go.kr)
+   -> USE ONLY if no higher-priority source exists in the scraped content
+6. News articles, aggregator blogs, third-party media -> FORBIDDEN as official_source_url
+When sources contradict each other, ALWAYS use the higher-priority source's dates.
+When a lower-priority source is the only one available, note it in 'remarks'.
 """
 
     candidate_info_str = "\n".join([f"- {url}" for url in candidate_info_links]) if candidate_info_links else "None found."
     candidate_reg_str = "\n".join([f"- {url}" for url in candidate_reg_links]) if candidate_reg_links else "None found."
 
     user_prompt = f"""
+{uni_context_note}
 TODAY'S DATE: {time.strftime('%Y-%m-%d')} (use this to determine if the scholarship is currently OPEN, CLOSED, or NOT_YET_OPENED)
 
 SCHOLARSHIP NAME TO VERIFY: {scholarship_name}
@@ -583,27 +742,172 @@ def run_comparison():
     
     processed_results = []
     model_name = os.getenv("OPENAI_MODEL_2", "zai-glm-4.7")
-    
+
     quota_exceeded = False
     sch_name = TEST_SCHOLARSHIP_NAME
 
-    # Search query: scholarship name + year only — no country hardcoded.
-    # Everything must be discovered from the web; no spreadsheet metadata is used.
-    search_query = f"{sch_name} important date deadline {time.strftime('%Y')}"
+    # ── A4: Read Col C (Status) and Col D (Verified) for bypass check ─────────
+    # Re-read cells for the matched row so we can check bypass conditions.
+    # We need to iterate again since get_cell_text is defined inside the loop above.
+    bypass_cells = []
+    for idx2, r2 in enumerate(data_rows, start=2):
+        if idx2 == matched_row["row_idx"]:
+            bypass_cells = r2.get("values", [])
+            break
+
+    def _get_bypass_text(field_key: str) -> str:
+        col_idx = conn.col_map.get(field_key)
+        if col_idx and col_idx <= len(bypass_cells):
+            return bypass_cells[col_idx - 1].get("formattedValue", "").strip()
+        return ""
+
+    def _get_bypass_link(field_key: str) -> Optional[str]:
+        col_idx = conn.col_map.get(field_key)
+        if col_idx and col_idx <= len(bypass_cells):
+            cell = bypass_cells[col_idx - 1]
+            return cell.get("hyperlink") or cell.get("formattedValue") or None
+        return None
+
+    col_c_val = _get_bypass_text("active_status")   # Col C
+    col_d_val = _get_bypass_text("verified")         # Col D
+
+    if col_c_val.upper() == "T" and col_d_val.upper() == "F":
+        logger.info(
+            f"[BYPASS] '{sch_name}': Status=T, Verified=F → "
+            f"emailing sheet data directly (no search/LLM)."
+        )
+        bypass_data = {
+            "scholarship_name":           sch_name,
+            "status":                     "VERIFIED (MANUAL)",
+            "application_start_date":     None,
+            "application_deadline":       _get_bypass_text("estimated_timeline"),    # Col G verbatim
+            "official_source_url":        _get_bypass_link("historical_info_link"),  # Col I
+            "official_registration_url":  _get_bypass_link("historical_reg_link"),   # Col J
+            "processing_method_detected": _get_bypass_text("historical_method"),     # Col H
+            "supplementary_source_url":   None,
+            "url_verification_fallback_used": False,
+            "confidence_score":           1.0,
+            "remarks":                    _get_bypass_text("note"),                  # Col B verbatim
+        }
+        processed_results.append({
+            "row_idx":       matched_row["row_idx"],
+            "search_status": "BYPASS",
+            "verified_data": bypass_data,
+        })
+        save_result_json(sch_name, model_name, "BYPASS", processed_results)
+        send_scout_report_email(processed_results, quota_exceeded)
+        return
+    # ── End A4 bypass ─────────────────────────────────────────────────────────
+
+    # ── B2: Config-driven query + URL queue ────────────────────────────────────
+    from scholarship_config import get_scholarship_config
+    sch_cfg     = get_scholarship_config(sch_name)
+    name_parsed = parse_scholarship_name(sch_name)   # B3a — use name_parsed to avoid collision with URL parsing
+
+    if sch_cfg.get("preferred_query"):
+        search_query = sch_cfg["preferred_query"]
+        logger.info(f"[CONFIG] Using preferred query: {search_query}")
+    elif name_parsed["type"] == "uni_to_uni":
+        search_query = (
+            f"{name_parsed['scholarship']} {name_parsed['university']} "
+            f"2026 deadline application scholarship"
+        )
+        logger.info(f"[UNI-TO-UNI] Auto query: {search_query}")
+    else:
+        # Default: scholarship name + year only — no country hardcoded.
+        search_query = f"{sch_name} important date deadline {time.strftime('%Y')}"
     logger.info(f"Search query: '{search_query}'")
-    search_results = search_scholarship_with_retry(search_query) or []
-    
+
+    # Per-run domain allowlist: don't mutate the global OFFICIAL_DOMAINS
+    run_official_domains = set(OFFICIAL_DOMAINS)
+    if sch_cfg.get("preferred_domains"):
+        run_official_domains.update(sch_cfg["preferred_domains"])
+
+    # ── B4: LOCKED MODE — skip search engine, scrape only pre-configured URLs ──
+    # When locked_urls is set in config, the entire search pipeline is bypassed.
+    # URLs are scraped directly; {year} is substituted to the current calendar year.
+    is_locked = bool(sch_cfg.get("locked_urls"))
+    locked_source_note = ""
+
+    if is_locked:
+        cur_year = datetime.datetime.now().year
+        locked_urls = [u.format(year=cur_year) for u in sch_cfg["locked_urls"]]
+        urls_to_scrape = [(u, "Locked URL") for u in locked_urls]
+        search_status = "LOCKED"
+        locked_source_note = (
+            "[LOCKED SOURCE] Search engine skipped. Scraped only: "
+            + ", ".join(locked_urls)
+        )
+        logger.info(f"[LOCKED] Skipping search engine. Locked URLs: {locked_urls}")
+    else:
+        # A3: search now returns (results, search_status)
+        search_results, search_status = search_scholarship_with_retry(search_query)
+
+        # A3: abort early with differentiated remark if search completely failed
+        if not search_results:
+            remark_map = {
+                "NETWORK_FAILURE": (
+                    "[NETWORK FAILURE] Both DuckDuckGo and Yahoo were unreachable "
+                    "(SSL/connection error). No web context retrieved. "
+                    "Retry manually in a few minutes."
+                ),
+                "BLOCKED": (
+                    "[SEARCH BLOCKED] Search engines returned captcha/rate-limit. "
+                    "Wait ~5 minutes and re-run."
+                ),
+                "NO_RESULTS": (
+                    "[NO RESULTS] Search engines responded but returned 0 parseable "
+                    "result links. The scholarship name may need a config override in "
+                    "scholarship_config.py."
+                ),
+            }
+            remark = remark_map.get(search_status, "[UNKNOWN SEARCH FAILURE]")
+            logger.warning(f"Search failed ({search_status}). Sending failure report.")
+            processed_results.append({
+                "row_idx":       matched_row["row_idx"],
+                "search_status": search_status,
+                "verified_data": {
+                    "scholarship_name":           sch_name,
+                    "status":                     "UNKNOWN",
+                    "application_start_date":     None,
+                    "application_deadline":       None,
+                    "official_source_url":        None,
+                    "official_registration_url":  None,
+                    "supplementary_source_url":   None,
+                    "url_verification_fallback_used": True,
+                    "confidence_score":           0.0,
+                    "processing_method_detected": "Unknown",
+                    "remarks":                    remark,
+                }
+            })
+            save_result_json(sch_name, model_name, search_status, processed_results)
+            send_scout_report_email(processed_results, quota_exceeded)
+            return
+
+        search_results = search_results or []
+
+        # Build scrape queue: preferred URLs first, then search results
+        preferred_entries = [
+            (u, "Config Preferred URL") for u in sch_cfg.get("preferred_urls", [])
+        ]
+        search_entries = [
+            (r["url"], "Search Result") for r in search_results[:5]
+        ]
+        # Deduplicate: don't re-scrape preferred URLs if search also returned them
+        preferred_set  = {u for u, _ in preferred_entries}
+        search_entries = [e for e in search_entries if e[0] not in preferred_set]
+
+        # Official-first ordering among search entries (keep existing logic)
+        official_entries = [(u, t) for u, t in search_entries if not is_news_domain(u)]
+        news_entries     = [(u, t) for u, t in search_entries if is_news_domain(u)]
+
+        urls_to_scrape = preferred_entries + official_entries + news_entries
     # 2. Deep scraping & link extraction
-    # Only from search results — historical spreadsheet links are NOT scraped.
+    # Only from search results / preferred URLs — historical spreadsheet links are NOT scraped.
     scraped_pages = []
     all_candidate_info = []
     all_candidate_reg = []
     fetched_urls = set()
-    
-    # Put official/government results first so they get scraped and branched into first
-    official_results = [(r["url"], "Search Result") for r in search_results[:5] if not is_news_domain(r["url"])]
-    news_results    = [(r["url"], "Search Result") for r in search_results[:5] if is_news_domain(r["url"])]
-    urls_to_scrape  = official_results + news_results
         
     BINARY_EXTENSIONS = (".pdf", ".xlsx", ".xls", ".docx", ".doc", ".ppt", ".pptx", ".zip", ".rar")
     
@@ -645,6 +949,21 @@ def run_comparison():
             
         cleaned_text = clean_html(html)
         truncated_text = cleaned_text[:5000]
+
+        # B2: Translation sub-step for non-English pages
+        if sch_cfg.get("needs_translation") and cleaned_text:
+            lang_hint   = sch_cfg.get("translation_lang", "auto")
+            ascii_ratio = sum(
+                1 for c in cleaned_text if c.isascii() and c.isalpha()
+            ) / max(len(cleaned_text), 1)
+            if ascii_ratio < 0.05:
+                logger.info(
+                    f"Non-English content (ASCII ratio {ascii_ratio:.2f}). "
+                    f"Translating excerpt (lang_hint={lang_hint})..."
+                )
+                translated   = translate_text(cleaned_text[:500], source_lang=lang_hint)
+                cleaned_text = f"[TRANSLATED EXCERPT]:\n{translated}\n\n[ORIGINAL]:\n{cleaned_text}"
+                truncated_text = cleaned_text[:5000]
         
         links = extract_hyperlinks(html, url)
         candidates = filter_candidate_links(links, sch_name)
@@ -739,13 +1058,63 @@ def run_comparison():
     all_known_urls.update(all_candidate_reg)
     
     # 3. Invoke Cerebras LLM API
+    # B3b: Uni-to-uni LLM context injection
+    if name_parsed["type"] == "uni_to_uni":
+        uni_context_note = f"""
+IMPORTANT CONTEXT — UNI-TO-UNI SCHOLARSHIP:
+This is a UNI-TO-UNI entry. '{name_parsed["scholarship"]}' is being checked specifically
+for '{name_parsed["university"]}'. This university manages its own application window \u2014
+it may differ from the scholarship body's central portal dates.
+
+RULES FOR THIS ENTRY:
+1. For official_source_url and dates: PRIORITISE the university's own page.
+2. If the central scholarship body's dates are also found: include them in
+   'remarks' (e.g. "Central body deadline: YYYY-MM-DD. University page: YYYY-MM-DD").
+3. The university page date is what the user will act on \u2014 use it as the primary result.
+"""
+    else:
+        uni_context_note = ""
+
+    # date_source_domain: hard constraint injected when config specifies the ONLY valid date source
+    date_domain = sch_cfg.get("date_source_domain", "")
+    if date_domain:
+        uni_context_note += f"""
+\u26a0\ufe0f  HARD DATE SOURCE CONSTRAINT \u2014 READ AND FOLLOW STRICTLY:
+The dates for this scholarship MUST ONLY come from pages on the domain: {date_domain}
+  - If you find dates on pages from other domains (e.g. studyinjapan.go.jp, guides,
+    or any other country's embassy page), you MUST ignore those dates entirely.
+  - The official_source_url MUST be a URL on {date_domain}.
+  - If NO date information was found on {date_domain} pages in the scraped content, then:
+      * Set application_start_date = null
+      * Set application_deadline = null
+      * Set status = 'CLOSED' (conservative)
+      * Set url_verification_fallback_used = true
+      * In remarks, state exactly: "REQUIRED SOURCE ({date_domain}) was not accessible or had no dates."
+  - DO NOT substitute dates from any other domain, even if that domain has dates.
+  - This constraint is ABSOLUTE. There are no exceptions.
+"""
+
+    # B4: Locked mode LLM note — inform LLM that only pre-configured pages were scraped
+    # and that these pages ARE authoritative (prevents it rating them as "third-party blogs")
+    if is_locked:
+        uni_context_note += """
+⚠️  LOCKED SOURCE MODE — READ AND FOLLOW STRICTLY:
+The pages in the scraped context below are the ONLY sources available for this scholarship.
+No search engine was used. These pre-configured URLs are the designated authoritative sources:
+  - Treat them as official scholarship pages, NOT as third-party blogs or unofficial sites.
+  - Extract all date, status, and link information exclusively from these pages.
+  - Do NOT downgrade or dismiss these pages based on their domain name or writing style.
+  - These are the definitive sources the operator has verified for this scholarship.
+"""
+
     try:
         verified_data = verify_scholarship_llama(
             scholarship_name=matched_row["scholarship_name"],
             scraped_web_text=context_str,
             candidate_info_links=unique_candidate_info,
             candidate_reg_links=unique_candidate_reg,
-            model_name=model_name
+            model_name=model_name,
+            uni_context_note=uni_context_note,   # B3b
         )
         
         # Sanitize links: replace empty strings or literal "None" strings with Python None
@@ -809,6 +1178,26 @@ def run_comparison():
                     f"keeping as valid sub-page of a scraped domain."
                 )
 
+        # ── A2: START DATE ESTIMATION ────────────────────────────────────────────
+        # If LLM found a deadline but no start date, estimate start = deadline − 90 days.
+        _start = verified_data.get("application_start_date")
+        _end   = verified_data.get("application_deadline")
+        if _start is None and _end is not None:
+            try:
+                _end_dt   = date.fromisoformat(_end)
+                _start_dt = _end_dt - timedelta(days=90)
+                verified_data["application_start_date"] = _start_dt.isoformat()
+                verified_data["remarks"] = (
+                    (verified_data.get("remarks") or "") +
+                    " [Start date estimated: only deadline found — start = deadline − 90 days.]"
+                ).strip()
+                logger.info(
+                    f"Start date estimated: {_start_dt.isoformat()} "
+                    f"(deadline − 90 days from {_end})"
+                )
+            except ValueError:
+                pass  # unparseable end_date — leave start as None
+
         # ── STATUS SAFETY NET ───────────────────────────────────────────────────
         # If LLM returned OPEN but couldn't find a deadline, we can't confirm it.
         # Default conservatively to CLOSED so the user doesn't miss a deadline.
@@ -823,7 +1212,13 @@ def run_comparison():
                 (verified_data.get("remarks") or "") +
                 " [Status overridden to CLOSED: no explicit deadline date found to confirm OPEN.]"
             ).strip()
-        
+
+        # B4: Prepend locked source note to remarks so it's always visible in the email
+        if is_locked and locked_source_note:
+            verified_data["remarks"] = (
+                locked_source_note + " | " + (verified_data.get("remarks") or "")
+            ).strip(" |").strip()
+
         print(f"Verified Status:           {verified_data.get('status')}")
         print(f"Verified Start Date:       {verified_data.get('application_start_date')}")
         print(f"Verified Deadline:         {verified_data.get('application_deadline')}")
@@ -836,8 +1231,9 @@ def run_comparison():
         print(f"Remarks:                   {verified_data.get('remarks')}")
         
         processed_results.append({
-            "row_idx": matched_row["row_idx"],
-            "verified_data": verified_data
+            "row_idx":       matched_row["row_idx"],
+            "search_status": search_status,   # "SUCCESS" or "LOCKED"
+            "verified_data": verified_data,
         })
         
     except CerebrasQuotaExceededException as qe:
@@ -865,6 +1261,7 @@ def run_comparison():
     # Only send the email report so you can review results without touching spreadsheet data.
     if processed_results:
         logger.info("Prototype mode: skipping sheet write. Sending email report only...")
+        save_result_json(sch_name, model_name, "SUCCESS", processed_results)  # A1
         send_scout_report_email(processed_results, quota_exceeded)
     else:
         logger.warning("No results to save or email.")
@@ -900,9 +1297,28 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
     rows = []
     for r in processed_results:
         data = r["verified_data"]
-        
-        status = data.get("status", "CLOSED")
-        status_color = "#2ecc71" if status == "OPEN" else ("#f39c12" if status == "NOT_YET_OPENED" else "#e74c3c")
+
+        # A3/A4: determine display status and colour based on search_status first
+        search_status_val = r.get("search_status", "SUCCESS")
+        status            = data.get("status", "CLOSED")
+
+        if search_status_val == "NETWORK_FAILURE":
+            status_color = "#95a5a6"    # grey
+            status_label = "⚡ NET ERR"
+        elif search_status_val == "BLOCKED":
+            status_color = "#e67e22"    # dark orange
+            status_label = "🚫 BLOCKED"
+        elif search_status_val == "NO_RESULTS":
+            status_color = "#bdc3c7"    # light grey
+            status_label = "❓ NO DATA"
+        elif search_status_val == "BYPASS":
+            status_color = "#8e44ad"    # purple
+            status_label = "✅ VERIFIED"
+        else:
+            status_color = "#2ecc71" if status == "OPEN" else (
+                "#f39c12" if status == "NOT_YET_OPENED" else "#e74c3c"
+            )
+            status_label = status
         
         info_url = data.get("official_source_url")
         supp_url = data.get("supplementary_source_url")
@@ -921,13 +1337,33 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
             if reg_url else '<span style="color: #bdc3c7;">—</span>'
         )
         
+        # B3c: UNI-TO-UNI badge on scholarship name
+        _parsed_name = parse_scholarship_name(data.get("scholarship_name", ""))
+        if _parsed_name["type"] == "uni_to_uni":
+            name_display = (
+                f'{data.get("scholarship_name")} '
+                f'<span style="background:#8e44ad;color:white;font-size:10px;'
+                f'padding:1px 5px;border-radius:3px;vertical-align:middle;">UNI-TO-UNI</span>'
+            )
+        else:
+            name_display = data.get("scholarship_name", "")
+
+        # C1: date_precision — prefix estimated dates with ~
+        date_precision = data.get("date_precision", "exact")
+        start_display = data.get("application_start_date") or "N/A"
+        end_display   = data.get("application_deadline")    or "N/A"
+        if date_precision in ("monthly", "quarterly") and start_display != "N/A":
+            start_display = f"~{start_display}"
+        if date_precision in ("monthly", "quarterly") and end_display != "N/A":
+            end_display = f"~{end_display}"
+
         method = data.get("processing_method_detected") or "—"
         rows.append(f"""
         <tr style="border-bottom: 1px solid #dddddd;">
-            <td style="padding: 12px 15px; font-weight: bold; color: #333333;">{data.get("scholarship_name")}</td>
-            <td style="padding: 12px 15px; font-weight: bold; color: {status_color};">{status}</td>
-            <td style="padding: 12px 15px; color: #555555;">{data.get("application_start_date") or "N/A"}</td>
-            <td style="padding: 12px 15px; color: #555555;">{data.get("application_deadline") or "N/A"}</td>
+            <td style="padding: 12px 15px; font-weight: bold; color: #333333;">{name_display}</td>
+            <td style="padding: 12px 15px; font-weight: bold; color: {status_color};">{status_label}</td>
+            <td style="padding: 12px 15px; color: #555555;">{start_display}</td>
+            <td style="padding: 12px 15px; color: #555555;">{end_display}</td>
             <td style="padding: 12px 15px; font-size: 12px;">{info_cell}</td>
             <td style="padding: 12px 15px; font-size: 12px;">{reg_cell}</td>
             <td style="padding: 12px 15px; color: #555555; font-size: 12px;">{method}</td>
