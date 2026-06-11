@@ -503,7 +503,7 @@ def run_scout_pipeline() -> bool:
     # 1. Connect to Google Sheets
     sheet_connector = GoogleSheetsConnector()
     try:
-        sheet_connector.connect(read_only=dry_run)
+        sheet_connector.connect()
     except Exception as e:
         logger.critical(f"Aborting pipeline. Connection to Google Sheet failed: {str(e)}")
         print(f"\n{Colors.FAIL}[Critical Error] Connection to Google Sheets failed.{Colors.END}\n")

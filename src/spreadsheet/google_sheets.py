@@ -64,13 +64,12 @@ class GoogleSheetsConnector:
             "remarks":          ["Remarks", "Notes", "Summary"]
         }
 
-    def connect(self, read_only: bool = False) -> None:
+    def connect(self) -> None:
         """
         Authenticate with Google Sheets API and open the tracking sheet.
 
-        Args:
-            read_only: When True, skips auto-creating missing output header columns.
-                       Use this in prototype/testing context to avoid touching the sheet.
+        The connector NEVER modifies sheet structure (no auto-column creation).
+        Missing output columns are silently skipped — only existing columns are mapped.
         """
         if not self.spreadsheet_id:
             logger.error("SPREADSHEET_ID is not configured in .env")
@@ -98,7 +97,7 @@ class GoogleSheetsConnector:
             self.headers = [h.strip() for h in self.wks.row_values(1)]
             logger.info(f"Retrieved sheet headers: {self.headers}")
 
-            self._map_and_initialize_headers(read_only=read_only)
+            self._map_and_initialize_headers()
 
         except json.JSONDecodeError as je:
             logger.critical("GOOGLE_SERVICE_ACCOUNT_JSON in .env is not a valid JSON string!")
@@ -114,13 +113,13 @@ class GoogleSheetsConnector:
             logger.critical(f"Failed to connect to Google Sheets API: {str(e)}", exc_info=True)
             raise e
 
-    def _map_and_initialize_headers(self, read_only: bool = False) -> None:
+    def _map_and_initialize_headers(self) -> None:
         """
-        Dynamically maps input/output headers and automatically creates missing output headers.
+        Maps sheet headers to internal column keys.
 
-        Args:
-            read_only: When True, missing output columns are silently skipped instead of
-                       being appended to the sheet. No write operations are performed.
+        IMPORTANT: This method NEVER writes to or modifies the spreadsheet.
+        Output columns that do not already exist in the sheet are silently skipped.
+        The user is responsible for creating any output columns they want populated.
         """
         self.col_map = {}
         headers_lower = [h.lower() for h in self.headers]
@@ -146,59 +145,13 @@ class GoogleSheetsConnector:
         if missing_inputs:
             raise ValueError(f"Spreadsheet is missing required input columns: {missing_inputs}. Check your headers!")
 
-        # Map output columns
-        headers_to_add = []
+        # Map output columns — only map ones that already exist; never create new columns
         for key, aliases in self.expected_outputs.items():
             idx = find_col_idx(aliases)
             if idx:
                 self.col_map[key] = idx
             else:
-                if read_only:
-                    logger.debug(f"read_only mode: skipping missing output column '{aliases[0]}'")
-                else:
-                    primary_name = aliases[0]
-                    new_col_idx = len(self.headers) + len(headers_to_add) + 1
-                    headers_to_add.append((primary_name, new_col_idx))
-                    self.col_map[key] = new_col_idx
-                    logger.info(f"Will create output column '{primary_name}' at index {new_col_idx}")
-
-        # If we have missing output headers (production mode only), batch-append them to Row 1
-        if headers_to_add:
-            max_new_col = max(col_idx for _, col_idx in headers_to_add)
-            # Expand the sheet grid if it doesn't have enough columns yet.
-            # gspread raises APIError 400 if you write beyond the current grid dimensions.
-            try:
-                sheet_props = self.wks.spreadsheet.fetch_sheet_metadata()
-                for s in sheet_props.get("sheets", []):
-                    if s["properties"]["sheetId"] == self.wks.id:
-                        current_cols = s["properties"]["gridProperties"]["columnCount"]
-                        if max_new_col > current_cols:
-                            logger.info(
-                                f"Expanding sheet from {current_cols} to {max_new_col} columns "
-                                f"to accommodate new output headers..."
-                            )
-                            self.wks.spreadsheet.batch_update({
-                                "requests": [{
-                                    "updateSheetProperties": {
-                                        "properties": {
-                                            "sheetId": self.wks.id,
-                                            "gridProperties": {"columnCount": max_new_col}
-                                        },
-                                        "fields": "gridProperties.columnCount"
-                                    }
-                                }]
-                            })
-                        break
-            except Exception as expand_err:
-                logger.warning(f"Could not pre-expand sheet columns (will try writing anyway): {expand_err}")
-
-            logger.info(f"Appending {len(headers_to_add)} missing output header columns to Row 1...")
-            cells_to_add = []
-            for name, col_idx in headers_to_add:
-                cells_to_add.append(Cell(row=1, col=col_idx, value=name))
-                self.headers.append(name)
-            self.wks.update_cells(cells_to_add, value_input_option='USER_ENTERED')
-            logger.info("Successfully initialized missing output headers.")
+                logger.debug(f"Output column '{aliases[0]}' not found in sheet — skipping (will not be written).")
 
     def extract_hyperlink(self, cell_data: dict) -> str:
         """
