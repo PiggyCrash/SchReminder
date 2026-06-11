@@ -1,59 +1,79 @@
-# 🎓 Automated Academic Scout & Google Sheets Sync (FastAPI Manual Test Version)
+# 🎓 Automated Academic Scout & Google Sheets Sync
 
-An advanced verification agent that crawls real-time web search results (protected by robust anti-CAPTCHA strategies), verifies application windows via the **Google Gemini API**, writes updates back to your Google sheet in a single batch, and emails a daily status summary digest to your inbox.
+An advanced, highly resilient academic scout agent that tracks, crawls, and verifies scholarship application windows in real-time. It integrates a **4-engine search crawler**, OpenAI-compatible **Llama model verifications (via Cerebras)**, automated **Google Sheets sync orchestration**, and styled **HTML digest reports** emailed directly to your inbox.
 
-To help you test this manually and interactively, this version includes a local **FastAPI** web server with built-in interactive Swagger UI.
+Designed to handle real-time web search limitations, network blocks, API rate limits, and language barriers with maximum autonomy.
 
 ---
 
-## 🛠️ Key Production Safeguards
+## 🛠️ Premium Architectural Features
 
-### 1. Robust Search Harvesting (Anti-CAPTCHA Defenses)
-- Programmatic DuckDuckGo search integration utilizes the `duckduckgo_search` library to manage VQD cookies and internal API token validation, preventing automated IP blocks.
-- Try-except crawler blocks catch query failures and gracefully fall back to historical info/registration links instead of crashing the workflow.
+### 1. Robust Multi-Engine Crawler (Anti-CAPTCHA & Failover)
+* **4-Engine Search Schedule**: Queries **DuckDuckGo ➔ Yahoo ➔ Bing ➔ SearXNG** sequentially. The first engine to return results wins, avoiding reliance on a single provider.
+* **3-Round Aggressive Retry**: If all engines fail, the crawler retries after exponential delays (**0s ➔ 30s ➔ 60s**) with dynamic **User-Agent rotation** (Chrome, Safari, Firefox, Edge) and header spoofing to bypass Web Application Firewalls (WAF).
+* **Targeted Deep Crawling**: Crawls program index pages and automatically branches into child links (e.g. `/news`, `/announcements`, `/deadline`) matching structural keywords to locate text-based timeline notices.
 
-### 2. Gemini API 15 RPM Rate Limit Compliance
-- Synchronous `time.sleep(5)` pacing intervals ensure sheet-sync executions do not exceed 12 requests per minute, staying safely below the strict 15 RPM ceiling.
+### 2. Config-Driven Scholarship Overrides
+Located in [scholarship_config.py](file:///c:/Work/schreminder/src/config/scholarship_config.py), this engine overrides crawler behavior for complex sites:
+* `preferred_query` / `preferred_urls`: Directs searches to the exact sub-pages.
+* `locked_urls`: Skips search engines entirely to scrape only target portals (e.g. for GKS).
+* `date_source_domain`: Enforces date authority, preventing LLM from pulling dates from third-party blogs or wrong embassy regions.
+* `context_hint`: Injects operator-verified knowledge (e.g., "deadlines vary by school") to help the LLM draw accurate conclusions.
+* `needs_translation`: Detects non-English sites (under 5% ASCII ratio) and automatically translates page texts via MyMemory API.
 
-### 3. Consolidated State Commit (Batch Sheet Writes)
-- All processed results are accumulated in-memory and committed back using `wks.update_cells()` in a **single, consolidated batch update API call**, saving Google Sheets API write quota.
+### 3. Balanced Name Parser for University-Specific recommendations
+* Handled in [name_parser.py](file:///c:/Work/schreminder/src/engine/name_parser.py), it detects parenthesized tags like `(Scholarship Body) University Name` (e.g., `(MEXT Scholarship) Hokkaido University`) and automatically generates queries targeting specific recommendation guidelines.
+
+### 4. Enterprise API Congestion Resilience
+* **Queue Congestion Retry**: Automatically detects Cerebras `429 queue_exceeded` server loads and retries with backoff delays (**10s ➔ 20s ➔ 30s**).
+* **Per-Row Error Sentinels**: If an LLM call exhausts all retries, the system logs a `QUOTA_EXCEEDED` status for that row and **continues the batch** instead of aborting the pipeline. 
+
+### 5. Consolidated Google Sheets Synchronization
+* **Grid Pre-expansion**: Automatically expands Google Sheet dimensions before writing new output columns, avoiding grid-out-of-bounds `APIError 400`.
+* **Manual Override (Bypass Mode)**: If a row has `active_status = "T"` and `verified = "F"`, the engine bypasses search/LLM entirely and preserves user-entered data as `VERIFIED (MANUAL)`.
+* **Dry-Run Mode**: Setting `SCOUT_DRY_RUN=true` disables Google Sheet updates while still parsing web results, generating JSON outputs, and sending email digests.
 
 ---
 
 ## 📋 Google Spreadsheet Setup
 
-### 1. Spreadsheet Format & Headers
-Ensure your Google Sheet contains headers in **Row 1**. The program dynamically maps columns by searching case-insensitively for these keywords or their common aliases:
+The script dynamically maps column indices by matching Row 1 headers against case-insensitive keywords and aliases.
 
-| Field | Primary Header Target | Common Supported Aliases | Type |
-|---|---|---|---|
-| **Scholarship Name (Required)** | `Scholarship Name` | `Name`, `Scholarship` | Input |
-| **Historical Method** | `Processing Method (Historical)` | `Processing Method`, `Method` | Input |
-| **Historical Info Link (Required)** | `Info Link (Historical)` | `Info Link`, `Historical Info Link` | Input |
-| **Historical Reg Link (Required)** | `Registration Link (Historical)` | `Registration Link`, `Historical Registration Link` | Input |
-| **Estimated Timeline** | `Estimated Timeline` | `Timeline`, `Est Timeline` | Input |
-| **Status** | `Status` | `Live Status` | Output |
-| **Start Date** | `Start Date` | `Application Start Date` | Output |
-| **Deadline** | `Deadline` | `Application Deadline` | Output |
-| **Verified Info Link** | `Verified Info Link` | `Verified Source Link`, `Source URL` | Output |
-| **Verified Reg Link** | `Verified Reg Link` | `Verified Registration Link` | Output |
-| **Fallback Used** | `Fallback Used` | `Url Verification Fallback Used` | Output |
-| **Confidence** | `Confidence` | `Confidence Score` | Output |
-| **Detected Method** | `Detected Method` | `Processing Method Detected` | Output |
-| **Remarks** | `Remarks` | `Notes`, `Summary` | Output |
+### 1. Expected Column Mapping
+
+| Column Type | Script Key | Preferred Header | Supported Aliases / Alternative Headings |
+| :--- | :--- | :--- | :--- |
+| **Input** | `scholarship_name` | `Scholarship Name` | `Name`, `Scholarship` |
+| **Input** | `active_status` | `Status` | *(Must contain `T` or `t` to process the row)* |
+| **Input** | `verified` | `Verified` | *(If containing `F` or `f` while Status is `T`, triggers Manual Bypass)* |
+| **Input** | `historical_method` | `Processing Method (Historical)` | `Method`, `Processing Method`, `Reg. Path` |
+| **Input** | `historical_info_link`| `Info Link (Historical)` | `Info Link`, `Link Info`, `Historical Info Link` |
+| **Input** | `historical_reg_link` | `Registration Link (Historical)`| `Reg. Link`, `Link Daftar`, `Historical Registration Link` |
+| **Input** | `estimated_timeline` | `Estimated Timeline` | `Timeline`, `Est. Date` |
+| **Input** | `note` | `Note` | *Optional operator remarks* |
+| **Output** | `status` | `Verified Status` | `Scout Status` |
+| **Output** | `start_date` | `Verified Start Date` | `Start Date`, `Application Start Date` |
+| **Output** | `deadline` | `Verified Deadline` | `Deadline`, `Application Deadline` |
+| **Output** | `verified_info_url` | `Verified Info Link` | `Verified Source Link`, `Verified Info URL` |
+| **Output** | `supplementary_url` | `Supplementary Link` | `Supplementary Source URL`, `Announcement Link` |
+| **Output** | `verified_reg_url` | `Verified Reg Link` | `Verified Registration Link`, `Verified Reg URL` |
+| **Output** | `fallback_used` | `Fallback Used` | `Url Verification Fallback Used` |
+| **Output** | `confidence` | `Confidence Score` | `Confidence` |
+| **Output** | `detected_method` | `Detected Method` | `Processing Method Detected` |
+| **Output** | `remarks` | `Remarks` | `Notes`, `Summary` |
 
 ---
 
-## 🔑 Google Cloud API Access Control (IAM)
+## 🔑 IAM API Authorization
 
-To prevent `403 Sheet Not Found` authorization errors:
+To avoid Google API `403 Sheet Not Found` or authorization errors:
 1. Open your **Google Cloud IAM Console** and navigate to your Service Account dashboard.
-2. Locate and copy the generated **Service Account Email** (typically formatted like `your-service-account@project-id.iam.gserviceaccount.com`).
-3. Open your Tracking Google Spreadsheet, click **Share** at the top right, and invite the copied service account email as an **"Editor"**.
+2. Locate and copy the generated **Service Account Email** (e.g. `scout-agent@project.iam.gserviceaccount.com`).
+3. Open your Tracking Google Spreadsheet, click **Share** at the top right, and invite the email address as an **"Editor"**.
 
 ---
 
-## 💻 Local Quickstart & Manual Testing
+## 💻 Local Quickstart
 
 ### 1. Installation
 Clone the repository and install requirements:
@@ -61,29 +81,24 @@ Clone the repository and install requirements:
 pip install -r requirements.txt
 ```
 
-### 2. Environment Setup
-Copy the `.env.example` file to `.env`:
+### 2. Configure Environment
+Copy the example environment configuration to `.env`:
 ```bash
 cp .env.example .env
 ```
-Fill in the appropriate credentials, spreadsheet ID, and SMTP mail configuration.
+Fill in the appropriate API keys, spreadsheet ID, service account JSON string, and SMTP credentials.
 
 ### 3. Run FastAPI Web Server
 To launch the FastAPI server locally:
 ```bash
 uvicorn src.app:app --reload --host 127.0.0.1 --port 8000
 ```
+Then navigate to: 👉 **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)** to test via the Swagger UI.
 
-### 4. Test Manually via Swagger UI
-Open your browser and navigate to:
-👉 **[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)**
+* **`POST /verify`**: Manually verify a single scholarship row by name without running the full sync.
+* **`POST /sync`**: Manually trigger the full Google Sheets sync, updating rows and sending the report email.
 
-From this interactive dashboard, you can trigger two manual endpoints:
-1. **`POST /verify`**: Manually verify a single scholarship. Provide a scholarship name, and the API will crawl DuckDuckGo, query Gemini, and return the exact verified status and deadlines in real-time JSON format.
-2. **`POST /sync`**: Manually trigger the full sheet sync. This will run the orchestrator loop, update your spreadsheet rows, and send the styled report email immediately.
-
-### 5. Run via CLI (Alternative)
+### 4. Run via CLI
 ```bash
-python src/main.py
+python src/runner.py
 ```
-This runs the daily cron pipeline once in your terminal.
