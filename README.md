@@ -66,11 +66,11 @@ The script dynamically maps column indices by matching Row 1 headers against cas
 | **Input** | `historical_reg_link` | `Registration Link (Historical)`| `Reg. Link`, `Link Daftar`, `Historical Registration Link` |
 | **Input** | `estimated_timeline` | `Estimated Timeline` | `Timeline`, `Est. Date` |
 | **Input** | `note` | `Note` | *Optional operator remarks* |
-| **Output** | `status` | `Verified Status` | `Scout Status` |
 
 ### 2. Returning JSON values
 | Column Type | Script Key | Preferred Header | Supported Aliases / Alternative Headings |
 | :--- | :--- | :--- | :--- |
+| **Output** | `status` | `Verified Status` | `Scout Status` |
 | **Output** | `start_date` | `Verified Start Date` | `Start Date`, `Application Start Date` |
 | **Output** | `deadline` | `Verified Deadline` | `Deadline`, `Application Deadline` |
 | **Output** | `verified_info_url` | `Verified Info Link` | `Verified Source Link`, `Verified Info URL` |
