@@ -42,6 +42,14 @@ class CerebrasQuotaExceededException(Exception):
     pass
 
 
+# Scholarship name prefixes (inside the opening parenthesis) that should be
+# SKIPPED entirely -- these are internally-funded scholarships with no public
+# application portal that can be scraped or verified by the scout engine.
+SKIPPED_PREFIXES = {
+    "uni-funded",   # University-funded internal grants
+}
+
+
 # ── A1: RESULT PERSISTENCE ───────────────────────────────────────────────────
 def save_result_json(scholarship_name: str, model_used: str,
                      search_status: str, processed_results: list) -> None:
@@ -203,20 +211,26 @@ def clean_yahoo_url(redirect_url: str) -> str:
 
 def perform_bing_fallback_raw(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
     """
-    Fallback search using Yahoo (Bing returns a JS-only page on this machine).
-    Yahoo returns real HTML results that are parseable without JavaScript.
-    Retries up to 3 times on 5xx server errors (short 5s sleep between attempts).
+    Fallback search using Yahoo.
+    Retries up to 3 times on 5xx AND on network/connection errors with UA rotation.
     """
     logger.info(f"🌐 Falling back to Yahoo Search scraping for query: '{query}'")
     search_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(query)}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-    for attempt in range(1, 4):  # up to 3 quick retries for server errors
+
+    ua_pool = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    ]
+
+    for attempt in range(1, 4):
+        headers = {
+            'User-Agent': ua_pool[(attempt - 1) % len(ua_pool)],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
         try:
-            response = requests.get(search_url, headers=headers, timeout=15, allow_redirects=True)
+            response = requests.get(search_url, headers=headers, timeout=20, allow_redirects=True)
             if response.status_code >= 500:
                 logger.warning(f"Yahoo HTTP {response.status_code} (attempt {attempt}/3) — retrying in 5s...")
                 if attempt < 3:
@@ -240,23 +254,29 @@ def perform_bing_fallback_raw(query: str, max_results: int = 5) -> Optional[List
                 title = a.get_text(strip=True)
                 raw_href = a.get('href', '')
                 href = clean_yahoo_url(raw_href)
-                
                 snippet_div = el.find('div', class_='compText') or el.find('p')
                 snippet = snippet_div.get_text(strip=True)[:300] if snippet_div else ""
-                
                 if title and href and href.startswith('http'):
-                    results.append({
-                        "title": title,
-                        "url": href,
-                        "snippet": snippet
-                    })
+                    results.append({"title": title, "url": href, "snippet": snippet})
             if not results:
                 logger.warning("Yahoo returned 0 parseable results.")
                 return None
             logger.info(f"Yahoo: harvested {len(results)} results successfully.")
             return results
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as net_err:
+            # Network errors are transient — retry with next UA
+            logger.warning(f"Yahoo network error (attempt {attempt}/3): {type(net_err).__name__}: {net_err}")
+            if attempt < 3:
+                sleep_s = attempt * 5  # 5s, 10s
+                logger.info(f"Retrying Yahoo in {sleep_s}s with next UA...")
+                time.sleep(sleep_s)
+                continue
+            logger.error("Yahoo network error persisted after 3 attempts.")
+            return None
         except Exception as e:
-            logger.error(f"Yahoo fallback failed: {str(e)}")
+            logger.error(f"Yahoo fallback unexpected error: {str(e)}")
             return None
     return None
 
@@ -310,31 +330,171 @@ def _try_duckduckgo(query: str, max_results: int = 5) -> Optional[List[Dict[str,
 
 
 def _try_yahoo(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
-    """Yahoo search fallback (same logic as perform_bing_fallback_raw, renamed for clarity)."""
+    """Yahoo search fallback — delegates to perform_bing_fallback_raw."""
     return perform_bing_fallback_raw(query, max_results)
+
+
+def _try_bing(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
+    """
+    Bing HTML search — third engine fallback.
+    On completely different infrastructure from DDG/Yahoo.
+    Retries up to 3 times on network errors with UA rotation.
+    """
+    logger.info(f"Trying Bing search for query: '{query}'")
+    search_url = f"https://www.bing.com/search?q={urllib.parse.quote(query)}&setlang=en"
+
+    ua_pool = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+    ]
+
+    for attempt in range(1, 4):
+        headers = {
+            'User-Agent': ua_pool[(attempt - 1) % len(ua_pool)],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        try:
+            response = requests.get(search_url, headers=headers, timeout=20, allow_redirects=True)
+            if response.status_code == 429:
+                logger.warning(f"Bing rate-limited (attempt {attempt}/3).")
+                return None
+            if response.status_code >= 500:
+                logger.warning(f"Bing HTTP {response.status_code} (attempt {attempt}/3) - retrying in 5s...")
+                if attempt < 3:
+                    time.sleep(5)
+                    continue
+                return None
+            if not response.ok:
+                logger.warning(f"Bing HTTP {response.status_code}")
+                return None
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            results = []
+            for li in soup.find_all('li', class_='b_algo')[:max_results]:
+                h2 = li.find('h2')
+                if not h2:
+                    continue
+                a = h2.find('a', href=True)
+                if not a:
+                    continue
+                title = a.get_text(strip=True)
+                href  = a.get('href', '')
+                snippet_p = li.find('p') or li.find('div', class_='b_caption')
+                snippet = snippet_p.get_text(strip=True)[:300] if snippet_p else ''
+                if title and href and href.startswith('http'):
+                    results.append({'title': title, 'url': href, 'snippet': snippet})
+
+            if not results:
+                logger.warning("Bing returned 0 parseable results.")
+                return None
+            logger.info(f"Bing: harvested {len(results)} results successfully.")
+            return results
+
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as net_err:
+            logger.warning(f"Bing network error (attempt {attempt}/3): {type(net_err).__name__}: {net_err}")
+            if attempt < 3:
+                sleep_s = attempt * 5
+                logger.info(f"Retrying Bing in {sleep_s}s with next UA...")
+                time.sleep(sleep_s)
+                continue
+            logger.error("Bing network error persisted after 3 attempts.")
+            return None
+        except Exception as e:
+            logger.error(f"Bing unexpected error: {str(e)}")
+            return None
+    return None
+
+
+def _try_searx(query: str, max_results: int = 5) -> Optional[List[Dict[str, str]]]:
+    """
+    SearXNG public instance — fourth engine, last-resort fallback.
+    Aggregates Google/Bing/DDG via its own servers, so it works even when
+    individual engines block direct access from this machine.
+    Tries multiple public instances in order.
+    """
+    logger.info(f"Trying SearXNG search for query: '{query}'")
+
+    searx_instances = [
+        'https://searx.be',
+        'https://search.sapti.me',
+        'https://searxng.site',
+    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+    }
+
+    for instance in searx_instances:
+        try:
+            params = {
+                'q': query,
+                'format': 'json',
+                'engines': 'google,bing,duckduckgo',
+                'language': 'en-US',
+            }
+            response = requests.get(f"{instance}/search", headers=headers, params=params, timeout=20)
+            if not response.ok:
+                logger.warning(f"SearXNG {instance} HTTP {response.status_code} - trying next...")
+                continue
+            data = response.json()
+            results = []
+            for r in data.get('results', [])[:max_results]:
+                url     = r.get('url', '')
+                title   = r.get('title', '')
+                snippet = r.get('content', '')[:300]
+                if url and title and url.startswith('http'):
+                    results.append({'title': title, 'url': url, 'snippet': snippet})
+            if not results:
+                logger.warning(f"SearXNG {instance} returned 0 usable results - trying next...")
+                continue
+            logger.info(f"SearXNG ({instance}): harvested {len(results)} results.")
+            return results
+        except (requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as net_err:
+            logger.warning(f"SearXNG {instance} network error: {type(net_err).__name__} - trying next...")
+            continue
+        except Exception as e:
+            logger.warning(f"SearXNG {instance} error: {e} - trying next...")
+            continue
+
+    logger.error("All SearXNG instances failed.")
+    return None
 
 
 def search_scholarship_with_retry(query: str, max_results: int = 5) -> Tuple[Optional[List[Dict[str, str]]], str]:
     """
-    A3: Two-round search with bonus retry and classified search_status.
+    A3: Four-engine, three-round search with aggressive retry.
+
+    Each round tries: DDG -> Yahoo -> Bing -> SearXNG.
+    The first engine to return >= 1 result wins immediately.
+
+    Round schedule:
+      Round 1: all four engines (immediate)
+      Round 2: all four engines (after 30s sleep)
+      Round 3: all four engines (after 60s sleep)
 
     Returns (results, search_status) where search_status is one of:
-      'SUCCESS'          - >= 1 result retrieved
-      'NETWORK_FAILURE'  - connection/SSL error on both engines both rounds
-      'BLOCKED'          - captcha/rate-limit on both engines both rounds
-      'NO_RESULTS'       - engines responded but returned 0 parseable items
+      'SUCCESS'          - >= 1 result retrieved from any engine
+      'NETWORK_FAILURE'  - connection/SSL error across all engines all rounds
+      'BLOCKED'          - captcha/rate-limit across all engines all rounds
+      'NO_RESULTS'       - all engines responded but returned 0 parseable items
     """
     last_error_type = "NETWORK_FAILURE"
+    sleep_schedule  = [30, 60]  # sleep before round 2, round 3
 
-    for round_num in range(1, 3):  # Round 1, then Round 2 after sleep
-        logger.info(f"Search round {round_num}/2 for: '{query}'")
+    for round_num in range(1, 4):  # Round 1, Round 2, Round 3
+        logger.info(f"Search round {round_num}/3 for: '{query}'")
 
-        # --- try DuckDuckGo ---
+        # ---- Engine 1: DuckDuckGo ----
         try:
-            ddg_result = _try_duckduckgo(query, max_results)
-            if ddg_result:
-                return (ddg_result, "SUCCESS")
-            # Got a response but 0 results (captcha or empty)
+            result = _try_duckduckgo(query, max_results)
+            if result:
+                return (result, "SUCCESS")
             last_error_type = "BLOCKED"
         except (requests.exceptions.SSLError,
                 requests.exceptions.ConnectionError,
@@ -345,22 +505,31 @@ def search_scholarship_with_retry(query: str, max_results: int = 5) -> Tuple[Opt
             logger.warning(f"DDG unexpected error (round {round_num}): {e}")
             last_error_type = "NETWORK_FAILURE"
 
-        # --- try Yahoo fallback ---
-        yahoo_result = _try_yahoo(query, max_results)
-        if yahoo_result:
-            return (yahoo_result, "SUCCESS")
+        # ---- Engine 2: Yahoo ----
+        result = _try_yahoo(query, max_results)
+        if result:
+            return (result, "SUCCESS")
 
-        # --- both failed this round ---
-        if round_num == 1:
-            sleep_s = 60 + random.uniform(-5, 5)
+        # ---- Engine 3: Bing ----
+        result = _try_bing(query, max_results)
+        if result:
+            return (result, "SUCCESS")
+
+        # ---- Engine 4: SearXNG ----
+        result = _try_searx(query, max_results)
+        if result:
+            return (result, "SUCCESS")
+
+        # ---- All four engines failed this round ----
+        if round_num < 3:
+            sleep_s = sleep_schedule[round_num - 1] + random.uniform(-5, 5)
             logger.info(
-                f"Both search engines failed (round 1). "
-                f"Sleeping {sleep_s:.0f}s then retrying (round 2)..."
+                f"All 4 search engines failed (round {round_num}/3). "
+                f"Sleeping {sleep_s:.0f}s then retrying (round {round_num + 1}/3)..."
             )
             time.sleep(sleep_s)
 
-    # All retries exhausted
-    logger.error(f"All search attempts failed. Final status: {last_error_type}")
+    logger.error(f"All search attempts failed after 3 rounds x 4 engines. Final status: {last_error_type}")
     return (None, last_error_type)
 
 def clean_html(html_content: str) -> str:
@@ -737,17 +906,45 @@ CANDIDATE REGISTRATION LINKS FOUND on webpages:
     
     logger.info(f"Submitting verification request to Llama ({model_name}) API for: '{scholarship_name}'")
     start_time = time.time()
-    # Retry once on timeout — Cerebras can be slow with large contexts
-    for llm_attempt in range(1, 3):
+
+    # Retry loop: handles both Timeout and 429 queue_exceeded with exponential backoff.
+    # Up to 4 total attempts. Wait schedule: 10s -> 20s -> 30s between consecutive attempts.
+    # "queue_exceeded" 429 = transient server congestion, safe to retry.
+    # Any other 429 (hard rate/quota limit) is raised immediately without retry.
+    _LLM_RETRY_WAITS = (10, 20, 30)  # seconds to wait before attempt 2, 3, 4
+    response = None
+    for llm_attempt in range(1, 5):  # up to 4 attempts total
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=90)
-            break  # success
         except requests.exceptions.Timeout:
-            if llm_attempt < 2:
-                logger.warning(f"Cerebras API timed out (attempt {llm_attempt}/2) — retrying in 5s...")
-                time.sleep(5)
+            if llm_attempt < 4:
+                wait_s = _LLM_RETRY_WAITS[llm_attempt - 1]
+                logger.warning(
+                    f"Cerebras API timed out (attempt {llm_attempt}/4) — "
+                    f"retrying in {wait_s}s..."
+                )
+                time.sleep(wait_s)
+                continue
             else:
-                raise
+                raise  # all 4 attempts timed out
+
+        # Got a response — check if it's a retryable queue_exceeded (transient congestion)
+        if response.status_code == 429 and "queue_exceeded" in response.text:
+            if llm_attempt < 4:
+                wait_s = _LLM_RETRY_WAITS[llm_attempt - 1]
+                logger.warning(
+                    f"Cerebras server queue exceeded (attempt {llm_attempt}/4) — "
+                    f"server is temporarily congested. Retrying in {wait_s}s..."
+                )
+                time.sleep(wait_s)
+                continue
+            else:
+                raise CerebrasQuotaExceededException(
+                    f"Cerebras API limit/quota hit: {response.status_code} - {response.text}"
+                )
+
+        break  # non-timeout, non-queue_exceeded response — proceed
+
     latency = time.time() - start_time
     
     # Catch API rate-limiting or quota limit hits.
@@ -881,6 +1078,19 @@ def run_comparison():
         return
     # ── End A4 bypass ─────────────────────────────────────────────────────────
 
+    # ── SKIP: Internally-funded scholarships (e.g. (Uni-Funded) ...) ─────────
+    # These have no public portal to scrape. Notify and exit cleanly.
+    _sn_stripped = sch_name.strip()
+    if _sn_stripped.startswith("("):
+        _skip_m = re.match(r'^\(([^)]+)\)', _sn_stripped)
+        if _skip_m and _skip_m.group(1).strip().lower() in SKIPPED_PREFIXES:
+            logger.info(
+                f"[SKIP] '{sch_name}': prefix '({_skip_m.group(1)})' is in SKIPPED_PREFIXES. "
+                f"No public portal to scrape. Exiting without LLM call."
+            )
+            print(f"\n[SKIP] '{sch_name}' is a (Uni-Funded) scholarship -- skipping.")
+            return
+
     # ── B2: Config-driven query + URL queue ────────────────────────────────────
     from scholarship_config import get_scholarship_config
     sch_cfg     = get_scholarship_config(sch_name)
@@ -948,6 +1158,8 @@ def run_comparison():
                     f"configured — falling back to scraping preferred URLs only."
                 )
                 urls_to_scrape = [(u, "Config Preferred URL (search-failed fallback)") for u in fallback_preferred]
+                # Override status so email doesn't show NET ERR for scholarships that got results
+                search_status = "FALLBACK"
                 # Skip the normal queue-building below
             else:
                 remark_map = {
@@ -1455,11 +1667,20 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
         elif search_status_val == "BYPASS":
             status_color = "#8e44ad"    # purple
             status_label = "✅ VERIFIED"
+        elif search_status_val == "FALLBACK":
+            # Search engine failed but preferred_urls recovered the result
+            status_color = (
+                "#2ecc71" if status == "OPEN"
+                else "#f39c12" if status == "NOT_YET_OPENED"
+                else "#e74c3c"
+            )
+            _label = "NOT YET OPEN" if status == "NOT_YET_OPENED" else status
+            status_label = f"{_label} ⚙️"  # gear icon signals fallback mode
         else:
             status_color = "#2ecc71" if status == "OPEN" else (
                 "#f39c12" if status == "NOT_YET_OPENED" else "#e74c3c"
             )
-            status_label = status
+            status_label = "NOT YET OPEN" if status == "NOT_YET_OPENED" else status
         
         info_url = data.get("official_source_url")
         supp_url = data.get("supplementary_source_url")
@@ -1502,7 +1723,7 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
         rows.append(f"""
         <tr style="border-bottom: 1px solid #dddddd;">
             <td style="padding: 12px 15px; font-weight: bold; color: #333333;">{name_display}</td>
-            <td style="padding: 12px 15px; font-weight: bold; color: {status_color};">{status_label}</td>
+            <td style="padding: 12px 15px; font-weight: bold; color: {status_color}; text-decoration: none; white-space: nowrap;">{status_label}</td>
             <td style="padding: 12px 15px; color: #555555;">{start_display}</td>
             <td style="padding: 12px 15px; color: #555555;">{end_display}</td>
             <td style="padding: 12px 15px; font-size: 12px;">{info_cell}</td>
@@ -1526,6 +1747,7 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Scholarship Verification Run Report</title>
 </head>
 <body style="background-color: #f9f9f9; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; color: #333333;">
@@ -1538,16 +1760,17 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
             This report contains the latest verification details compiled by the automated Scout pipeline running model <strong>{model_name}</strong>.
         </p>
         
-        <table style="border-collapse: collapse; width: 100%; text-align: left; font-size: 14px;">
+        <div style="overflow-x: auto; -webkit-overflow-scrolling: touch;">
+        <table style="border-collapse: collapse; min-width: 800px; width: 100%; text-align: left; font-size: 14px;">
             <thead>
                 <tr style="background-color: #f8f9fa; border-bottom: 2px solid #3498db; color: #2c3e50;">
-                    <th style="padding: 12px 15px;">Scholarship Name</th>
-                    <th style="padding: 12px 15px;">Status</th>
-                    <th style="padding: 12px 15px;">Start Date</th>
-                    <th style="padding: 12px 15px;">Deadline</th>
-                    <th style="padding: 12px 15px;">Info Link</th>
-                    <th style="padding: 12px 15px;">Reg. Link</th>
-                    <th style="padding: 12px 15px;">Method</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Scholarship Name</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Status</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Start Date</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Deadline</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Info Link</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Reg. Link</th>
+                    <th style="padding: 12px 15px; white-space: nowrap;">Method</th>
                     <th style="padding: 12px 15px;">Remarks</th>
                 </tr>
             </thead>
@@ -1555,6 +1778,7 @@ def send_scout_report_email(processed_results: List[Dict[str, Any]], quota_excee
                 {formatted_rows}
             </tbody>
         </table>
+        </div>
         
         <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eeeeee; font-size: 12px; color: #95a5a6; text-align: center;">
             Academic Scout Automated System • Local time: {time.strftime('%Y-%m-%d %H:%M:%S')}

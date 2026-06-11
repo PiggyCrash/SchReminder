@@ -1,10 +1,10 @@
-# Scholarship Scout: System Evolution & Logic History
+﻿# Scholarship Scout: System Evolution & Logic History
 
 This document chronicles the development of the automated scholarship scouting and verification system from the very first production implementation to the current resilient testing prototype.
 
 ---
 
-## 🛠️ The Architecture Evolution
+## ðŸ› ï¸ The Architecture Evolution
 
 ```mermaid
 graph TD
@@ -25,7 +25,7 @@ graph TD
 
 ---
 
-## 📅 Version 1: Batch-Sync Production Engine ([runner.py](file:///c:/Work/schreminder/src/runner.py), [scout.py](file:///c:/Work/schreminder/src/engine/scout.py))
+## ðŸ“… Version 1: Batch-Sync Production Engine ([runner.py](file:///c:/Work/schreminder/src/runner.py), [scout.py](file:///c:/Work/schreminder/src/engine/scout.py))
 
 ### Method/Logic
 The initial release was designed to run as an automated batch pipeline (via CLI or FastAPI endpoints like `/sync`). It performed the following steps:
@@ -43,7 +43,7 @@ The initial release was designed to run as an automated batch pipeline (via CLI 
 
 ---
 
-## 🧪 Version 2: The Prototyping Phase ([sch_prototype.py](file:///c:/Work/schreminder/scratch/sch_prototype.py))
+## ðŸ§ª Version 2: The Prototyping Phase ([sch_prototype.py](file:///c:/Work/schreminder/scratch/sch_prototype.py))
 
 ### Method/Logic
 To resolve Version 1's issues without constantly wasting Google Sheets and Gemini API quotas, a prototyping file ([sch_prototype.py](file:///c:/Work/schreminder/scratch/sch_prototype.py)) was introduced to:
@@ -94,7 +94,7 @@ To resolve Version 1's issues without constantly wasting Google Sheets and Gemin
 
 #### 11. Refined Search Queries & Sanitized Links
 * **Problem**: Queries like `{name} scholarship` were too broad. Also, placeholder string values like `"None"`, `"null"`, `"-"`, or `"n/a"` returned by the LLM caused broken HTML links (e.g. `<a href="None">`) in output reports.
-* **Fix**: Appended `"important date deadline"` to the search query. Added a Python `sanitize_link()` function that normalizes all variations of null strings to Python `None`, rendering as a clean `—` (em-dash) in output summaries.
+* **Fix**: Appended `"important date deadline"` to the search query. Added a Python `sanitize_link()` function that normalizes all variations of null strings to Python `None`, rendering as a clean `â€”` (em-dash) in output summaries.
 
 #### 12. News/Media Domain Blocklist
 * **Problem**: The scraper followed and extracted links from third-party Indonesian news portals (e.g., Kompas, Detik, Tribunnews), causing the LLM to cite news articles instead of the official scholarship website.
@@ -114,14 +114,14 @@ To resolve Version 1's issues without constantly wasting Google Sheets and Gemin
 
 #### 16. Supplementary Source URLs (Official Announcements)
 * **Problem**: When a scholarship cycle closes, official primary portals often delete deadline references entirely, but official announcement pages (e.g., LPDP/Ministry news boards) still contain active extension notices.
-* **Fix**: Added `supplementary_source_url` to the LLM JSON output. If the primary page lacks dates but an official announcement post on the same domain lists active timelines, the LLM captures the announcement URL. Python validates it, and the HTML email renders it as a separate purple `[Announcement ↗]` link next to the main Info Link.
+* **Fix**: Added `supplementary_source_url` to the LLM JSON output. If the primary page lacks dates but an official announcement post on the same domain lists active timelines, the LLM captures the announcement URL. Python validates it, and the HTML email renders it as a separate purple `[Announcement â†—]` link next to the main Info Link.
 
 ---
 
-## 🏗️ Phase 3: Zero-Historical-Dependency Architecture
+## ðŸ—ï¸ Phase 3: Zero-Historical-Dependency Architecture
 
 ### Design Principle Change
-> *"No cheating. The program reads only the scholarship name from the spreadsheet. Everything else — links, dates, processing method — must be discovered independently through web scraping."*
+> *"No cheating. The program reads only the scholarship name from the spreadsheet. Everything else â€” links, dates, processing method â€” must be discovered independently through web scraping."*
 
 This was a deliberate integrity constraint enforced after tests showed the pipeline was using historical spreadsheet links as a "cheat sheet" rather than genuinely discovering data. The historical info/reg links remain in the spreadsheet for the **user's own validation**, not for the engine.
 
@@ -129,10 +129,10 @@ This was a deliberate integrity constraint enforced after tests showed the pipel
 
 | Symptom | Root Cause |
 |---------|-----------|
-| GKS/ARICE/MEXT: regression to all-null results on re-test | Search query hardcoded `"Indonesia"` — for Hungary, Romania, Japan scholarships, this made Yahoo return Indonesian news articles instead of official sites, which were then blocked by the news filter |
-| MEXT: never returns any link or date | Embassy server blocks scraper; historical link was the only fallback — now removed, so LLM gets blank context |
-| GKS remarks say "Feb–March" when actual is February only | LLM was blending the `estimated_timeline` cell value from the sheet into its answer |
-| `branching_count` reset per URL | Bug: counter was inside the outer loop, so each top-level page got 2 fresh branches. Max effective branches = 2 × #URLs, not 2 total |
+| GKS/ARICE/MEXT: regression to all-null results on re-test | Search query hardcoded `"Indonesia"` â€” for Hungary, Romania, Japan scholarships, this made Yahoo return Indonesian news articles instead of official sites, which were then blocked by the news filter |
+| MEXT: never returns any link or date | Embassy server blocks scraper; historical link was the only fallback â€” now removed, so LLM gets blank context |
+| GKS remarks say "Febâ€“March" when actual is February only | LLM was blending the `estimated_timeline` cell value from the sheet into its answer |
+| `branching_count` reset per URL | Bug: counter was inside the outer loop, so each top-level page got 2 fresh branches. Max effective branches = 2 Ã— #URLs, not 2 total |
 | Stipendium dates wrong (future cycle) | Date buried 2 clicks deep; homepage has no dates. Branching keyword list lacked `"news"`, `"application"`, `"open"` so the news article sub-link was never followed |
 | `processing_method_detected` not in email | Email HTML table had no Method column |
 
@@ -141,10 +141,10 @@ This was a deliberate integrity constraint enforced after tests showed the pipel
 #### 17. Removed All Historical Data from LLM Pipeline
 * **What changed**: `verify_scholarship_llama()` parameters `historical_method`, `historical_info_link`, `historical_reg_link`, `estimated_timeline` were removed entirely. `matched_row` now only contains `row_idx` and `scholarship_name`.
 * **Why**: The historical links were being used as a crutch. The engine should earn its results from the web. The spreadsheet links are the user's reference, not the engine's input.
-* **Impact**: LLM system prompt rewritten — Phase 1 (historical link priority) removed. URL Integrity Rule no longer includes "(b) historical links from user". Field 8 (`url_verification_fallback_used`) redefined as "true if LLM relied on training knowledge, not scraping."
+* **Impact**: LLM system prompt rewritten â€” Phase 1 (historical link priority) removed. URL Integrity Rule no longer includes "(b) historical links from user". Field 8 (`url_verification_fallback_used`) redefined as "true if LLM relied on training knowledge, not scraping."
 
 #### 18. Dynamic Search Query (No Hardcoded Country)
-* **Problem**: `"Indonesia"` was hardcoded in the search string — ruining non-Indonesian scholarships (Hungary, Romania, Japan) because Yahoo returned Indonesian-language news articles about those scholarships instead of the official foreign sites.
+* **Problem**: `"Indonesia"` was hardcoded in the search string â€” ruining non-Indonesian scholarships (Hungary, Romania, Japan) because Yahoo returned Indonesian-language news articles about those scholarships instead of the official foreign sites.
 * **Fix**: Query simplified to `"{name} important date deadline {year}"`. The search engine will find the official site naturally. Country is no longer read from the spreadsheet.
 
 #### 19. Official-First URL Ordering
@@ -152,19 +152,19 @@ This was a deliberate integrity constraint enforced after tests showed the pipel
 * **Fix**: After Yahoo returns results, split into `official_results` (not news domain) and `news_results`, then `urls_to_scrape = official_results + news_results`. Official sites always scraped and branched first.
 
 #### 20. Global Branching Counter (`branching_count` bug fixed)
-* **Problem**: `branching_count = 0` was reset inside the outer scraping loop — meaning every top-level URL got 2 fresh branch attempts, not 2 total.
+* **Problem**: `branching_count = 0` was reset inside the outer scraping loop â€” meaning every top-level URL got 2 fresh branch attempts, not 2 total.
 * **Fix**: Moved `branching_count = 0` and `MAX_BRANCHES = 4` to before the outer loop. Now globally capped at 4 sub-page fetches per scholarship run.
 
 #### 21. Expanded Branching Keyword List
-* **Problem**: The old keyword list lacked terms like `"news"`, `"application"`, `"open"`, `"burse"`, `"program"` — so announcement sub-pages (e.g. `/news/2026-application`) were never followed.
+* **Problem**: The old keyword list lacked terms like `"news"`, `"application"`, `"open"`, `"burse"`, `"program"` â€” so announcement sub-pages (e.g. `/news/2026-application`) were never followed.
 * **Fix**: Added 13 new branching keywords covering announcement, news, program, selection, intake, period, cycle, eligib, require, burse, grant, award, open.
 
 #### 22. Info URL Hallucination Guard Added
 * **Problem**: Only the registration URL was validated against scraped URLs. The LLM could still hallucinate an info URL from a domain never visited.
-* **Fix**: Added a second guard for `official_source_url`. If the domain was never visited → set to null. If the domain was visited but the exact path differs → allowed (legitimate sub-page of a scraped official domain).
+* **Fix**: Added a second guard for `official_source_url`. If the domain was never visited â†’ set to null. If the domain was visited but the exact path differs â†’ allowed (legitimate sub-page of a scraped official domain).
 
 #### 23. Hallucination Guard Fallback = `None` (not historical link)
-* **Problem**: Old guard fell back to `matched_row["historical_reg_link"]` — which no longer exists in the data model.
+* **Problem**: Old guard fell back to `matched_row["historical_reg_link"]` â€” which no longer exists in the data model.
 * **Fix**: Both reg and info guards now set to `None` on rejection. No spreadsheet data is used as fallback.
 
 #### 24. Processing Method Column Added to Email
@@ -172,17 +172,17 @@ This was a deliberate integrity constraint enforced after tests showed the pipel
 
 ---
 
-## 🎯 Current Success State
+## ðŸŽ¯ Current Success State
 With the robust prototyping upgrades, the scouting engine has been successfully validated across several major targets:
 1. **GKS (Global Korea Scholarship)**: Correctly verified as `CLOSED` (Feb 12 to Feb 25, 2026), successfully navigating the Indonesia-specific branch link and emailing the report.
 2. **Zuyd ZES - Reguler**: Correctly verified as `CLOSED` (deadline: May 1) based on the official university portal data.
 3. **Beasiswa Indonesia Bangkit (BIB) LPDP**: Correctly verified as `CLOSED` (original dates 2025-03-28 to 2025-06-07). The URL Hallucination Guard successfully intercepted a hallucinated LPDP registration path and reverted it to the historical link.
 
-> ⚠️ **Re-testing required** after Phase 3 changes for: Stipendium Hungaricum, MEXT, GKS, ARICE Romania, Akebono Foundation.
+> âš ï¸ **Re-testing required** after Phase 3 changes for: Stipendium Hungaricum, MEXT, GKS, ARICE Romania, Akebono Foundation.
 
 ---
 
-## 🚀 Phase 4: Robustness, Config-Driven Scraping & Uni-to-Uni Schema
+## ðŸš€ Phase 4: Robustness, Config-Driven Scraping & Uni-to-Uni Schema
 
 ### Design Principles
 > *"Failures must be distinguishable. Wrong source is worse than no source. Per-scholarship knowledge belongs in code, not in the engineer's head."*
@@ -193,20 +193,20 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 
 | Symptom | Root Cause |
 |---------|-----------|
-| Inpex, BIM, Sultan Qaboos, HDR — all `None` result, indistinguishable | `NETWORK_FAILURE` silently coerced to generic remark. Could not tell if it was network down or empty results |
-| EGYAID — intermittent `None` on first run, OK on second | Transient DDG/Yahoo failure with no retry after wait |
+| Inpex, BIM, Sultan Qaboos, HDR â€” all `None` result, indistinguishable | `NETWORK_FAILURE` silently coerced to generic remark. Could not tell if it was network down or empty results |
+| EGYAID â€” intermittent `None` on first run, OK on second | Transient DDG/Yahoo failure with no retry after wait |
 | MEXT always gets `studyinjapan.go.jp` (wrong, global portal) | Generic search query; Indonesian embassy page never in top 5 results |
-| GKS gets Korean-language portal instead of Indonesia-specific dates | Same — wrong search result bias |
-| GOI-IES / Kazakhstan — zero results or wrong language | Low ranking + non-English page; no language fallback |
-| DAAD STEM — news article URL instead of DB deep link | Param-based URL never indexed by search engines |
-| Hyundai CMK — month-range dates (Dec-Jan) not parsed | LLM had no instruction for month-range inference |
-| Only end-date found → status shows CLOSED even if open | No start-date estimation logic |
+| GKS gets Korean-language portal instead of Indonesia-specific dates | Same â€” wrong search result bias |
+| GOI-IES / Kazakhstan â€” zero results or wrong language | Low ranking + non-English page; no language fallback |
+| DAAD STEM â€” news article URL instead of DB deep link | Param-based URL never indexed by search engines |
+| Hyundai CMK â€” month-range dates (Dec-Jan) not parsed | LLM had no instruction for month-range inference |
+| Only end-date found â†’ status shows CLOSED even if open | No start-date estimation logic |
 | Status=T, Verified=F wasting search/LLM API calls | No bypass path for manually-confirmed scholarships |
 
 ### Changes Implemented
 
-#### 25. Result Persistence — `/result` JSON Folder (A1)
-* **What changed**: `save_result_json()` helper writes one timestamped JSON file per run to `scratch/result/`. Called on every exit path — success, failure, bypass.
+#### 25. Result Persistence â€” `/result` JSON Folder (A1)
+* **What changed**: `save_result_json()` helper writes one timestamped JSON file per run to `scratch/result/`. Called on every exit path â€” success, failure, bypass.
 * **Why**: No history existed between runs. Impossible to track regression or compare results.
 
 #### 26. Start Date Estimation (A2)
@@ -218,7 +218,7 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **Why**: Previously all failures looked the same. Now the remark text and email cell colour are specific to the failure type.
 
 #### 28. Bonus Retry Round (A3)
-* **What changed**: After both DDG and Yahoo fail in round 1, sleep `60 ± 5s` then retry the full DDG → Yahoo sequence once more before giving up.
+* **What changed**: After both DDG and Yahoo fail in round 1, sleep `60 Â± 5s` then retry the full DDG â†’ Yahoo sequence once more before giving up.
 * **Why**: Transient failures (EGYAID) were failing permanently when a short wait would have recovered them.
 
 #### 29. Differentiated Remark Text (A3)
@@ -227,22 +227,22 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **`NO_RESULTS`**: `[NO RESULTS] Search engines responded but returned 0 parseable result links...`
 
 #### 30. Email Cell Colour per Failure Mode (A3)
-* Grey `⚡ NET ERR` for `NETWORK_FAILURE`
-* Dark orange `🚫 BLOCKED` for `BLOCKED`
-* Light grey `❓ NO DATA` for `NO_RESULTS`
-* Purple `✅ VERIFIED` for `BYPASS`
+* Grey `âš¡ NET ERR` for `NETWORK_FAILURE`
+* Dark orange `ðŸš« BLOCKED` for `BLOCKED`
+* Light grey `â“ NO DATA` for `NO_RESULTS`
+* Purple `âœ… VERIFIED` for `BYPASS`
 
 #### 31. T+F Bypass Path (A4)
-* **What changed**: Before search, checks Col C (`Status`) and Col D (`Verified`). If `T + F`, reads Col B, G, H, I, J from the sheet and emails them directly — skipping search and LLM entirely.
+* **What changed**: Before search, checks Col C (`Status`) and Col D (`Verified`). If `T + F`, reads Col B, G, H, I, J from the sheet and emails them directly â€” skipping search and LLM entirely.
 * **Why**: Manually-verified scholarships were wasting API quota on unnecessary search calls.
 
-#### 32–33. Col B (`Note`) and Col D (`Verified`) added to `col_map` (A4)
+#### 32â€“33. Col B (`Note`) and Col D (`Verified`) added to `col_map` (A4)
 * **What changed**: `google_sheets.py` `expected_inputs` now includes `"note": ["Note"]` and `"verified": ["Verified"]`.
 
-#### 34. Per-Scholarship Config Table — `scholarship_config.py` (B1)
+#### 34. Per-Scholarship Config Table â€” `scholarship_config.py` (B1)
 * **What changed**: New file `scratch/scholarship_config.py` with `SCHOLARSHIP_CONFIG` dict and `get_scholarship_config()` lookup function.
 * **Entries**: MEXT, GKS, GOI-IES, GO-PSP, Kazakhstan, MTCP, DAAD STEM, DAAD EPOS, Hyundai CMK, LPDP Tahap 1 & 2, ANSO UCAS/USTC, ADB-JSP IST/Keio.
-* **Why**: Wrong-source bias is best fixed by injecting the correct URL directly — not by changing LLM prompts.
+* **Why**: Wrong-source bias is best fixed by injecting the correct URL directly â€” not by changing LLM prompts.
 
 #### 35. Config-Driven Scraping (B2)
 * **What changed**: `run_comparison()` calls `get_scholarship_config()` before building the search query. `preferred_urls` are front-loaded in `urls_to_scrape` ahead of search results. `preferred_query` replaces the auto-generated query.
@@ -251,7 +251,7 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **What changed**: After `clean_html()`, if `needs_translation: True` in config and ASCII ratio < 5%, calls MyMemory API to translate the first 500 chars. Prepends `[TRANSLATED EXCERPT]` to cleaned text.
 * **Why**: Kazakhstan Bolashak site defaults to Kazakh/Russian. LLM needs English context.
 
-#### 37. Uni-to-Uni Schema — `parse_scholarship_name()` (B3a)
+#### 37. Uni-to-Uni Schema â€” `parse_scholarship_name()` (B3a)
 * **What changed**: New helper function detects `(Scholarship Name) University Name` pattern. Returns `uni_to_uni` type or `centralized` type. Blocklist `_UNI_TO_UNI_SKIP_PREFIXES` handles `(Uni-Funded)` false positives.
 
 #### 38. Uni-to-Uni LLM Context Injection (B3b)
@@ -261,7 +261,7 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **What changed**: Scholarship name cell in email gets a purple `UNI-TO-UNI` span tag for entries detected as uni-to-uni.
 
 #### 40. `date_precision` Field + Monthly Inference Rule (C1)
-* **What changed**: System prompt adds field #12 (`date_precision`) with values `exact / monthly / quarterly / unknown`. Month-range sources (e.g. "Dec–Jan") now get explicit inference rules: start = first of month, end = last of month, nearest upcoming year.
+* **What changed**: System prompt adds field #12 (`date_precision`) with values `exact / monthly / quarterly / unknown`. Month-range sources (e.g. "Decâ€“Jan") now get explicit inference rules: start = first of month, end = last of month, nearest upcoming year.
 
 #### 41. Email `~` Prefix for Estimated Dates (C1)
 * **What changed**: Email renderer reads `date_precision`. If `monthly` or `quarterly`, prefixes both date cells with `~`.
@@ -271,7 +271,7 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 
 ---
 
-## 🩹 Phase 5: API Error Handling & False-Positive Quota Detection (June 9, 2026)
+## ðŸ©¹ Phase 5: API Error Handling & False-Positive Quota Detection (June 9, 2026)
 
 ### Problems Found
 
@@ -291,12 +291,12 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 #### 45. Greedy Regex in `parse_scholarship_name()` (Bug Fix)
 * **What changed**: The regex `r'^\((.+?)\)\s+(.+)$'` (non-greedy) was changed to `r'^\((.+)\)\s+(.+)$'` (greedy).
 * **Why**: The non-greedy `(.+?)` stops at the **first** `)` it encounters. For a name like `(International Graduate Program (IGP) Special MEXT Scholarship) Hokkaido University`, it stopped at the `)` after `IGP`, giving:
-  - `scholarship = "International Graduate Program (IGP"` ❌
-  - `university  = "Special MEXT Scholarship) Hokkaido University"` ❌
+  - `scholarship = "International Graduate Program (IGP"` âŒ
+  - `university  = "Special MEXT Scholarship) Hokkaido University"` âŒ
   
   The greedy version correctly matches the **outermost** `)`:
-  - `scholarship = "International Graduate Program (IGP) Special MEXT Scholarship"` ✅
-  - `university  = "Hokkaido University"` ✅
+  - `scholarship = "International Graduate Program (IGP) Special MEXT Scholarship"` âœ…
+  - `university  = "Hokkaido University"` âœ…
 * **Impact**: The broken parse produced a mangled search query, causing Yahoo to return irrelevant results. This bug affected every uni-to-uni scholarship whose scholarship body name contains nested parentheses.
 
 #### 46. Official-Domain Branching without Path Keyword Requirement
@@ -314,15 +314,86 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **What changed**: Added a binary extension check (`BINARY_EXTENSIONS`) inside the branching loop, mirroring the same check that already existed in the outer scraping loop.
 * **Why**: PDF links (e.g. `IGP-MEXTscholarship_leaflet2025.pdf`) were consuming branch slots. PDFs return no usable text, so fetching them wasted one of the 4 available branch slots on every run.
 
-#### 49. HTTP→HTTPS Upgrade for Official TLDs
+#### 49. HTTPâ†’HTTPS Upgrade for Official TLDs
 * **What changed**: Added `_upgrade_to_https()` helper and `_HTTPS_ONLY_TLDS` constant. `fetch_webpage_content()` now:
   1. **Proactively** rewrites `http://` to `https://` for domains ending in `.ac.jp`, `.go.jp`, `.go.kr`, `.edu`, `.gov`, etc. before making any request.
   2. **Reactively** retries with `https://` when a `ConnectTimeout` hits an `http://` URL (for unlisted domains).
 * **Why**: Old HTML pages sometimes contain `http://` links that were valid years ago. Modern academic/government servers no longer listen on port 80, so these links cause `ConnectTimeout` at port 80. The `altair.sci.hokudai.ac.jp` link on the `lfsci.hokudai.ac.jp` news page was `http://`, causing every attempt to time out.
 
 #### 50. Unicode Fix in Start Date Estimation Remark
-* **What changed**: Replaced `−` (U+2212, mathematical minus) with plain ASCII `-` in the start date estimation remark string and logger call.
-* **Why**: The `−` character is not encodable in Windows cp1252 (the default PowerShell console encoding), causing `UnicodeEncodeError` and crashing the print statement at line 1251.
+* **What changed**: Replaced `âˆ’` (U+2212, mathematical minus) with plain ASCII `-` in the start date estimation remark string and logger call.
+* **Why**: The `âˆ’` character is not encodable in Windows cp1252 (the default PowerShell console encoding), causing `UnicodeEncodeError` and crashing the print statement at line 1251.
+
+---
+
+## ðŸŽ¯ Current Success State
+
+| Scholarship | Expected Status | Notes |
+|-------------|-----------------|-------|
+| GKS (Global Korea Scholarship) | CLOSED | Validated Phase 3 |
+| Zuyd ZES - Reguler | CLOSED | Validated Phase 3 |
+| Beasiswa Indonesia Bangkit (BIB) LPDP | CLOSED | Validated Phase 3 |
+| **(IGP Special MEXT Scholarship) Hokkaido University** | **OPEN** | **âœ… Fully validated Phase 5 â€” correct page, correct 2026 dates, confidence 1.0** |
+| All batch test passing (18+ scholarships) | Various | Validated Phase 4 batch run |
+| MEXT, GKS, GOI-IES, Kazakhstan | Correct source | Config-driven, pending re-test |
+| DAAD STEM | Correct deep link | Config-driven, pending re-test |
+| Inpex / BIM / Sultan Qaboos / HDR | `âš¡ NET ERR` cell | Failure mode now visible, pending re-test |
+
+
+> ⚠️ **Re-testing required** after Phase 4 changes for all Phase B config entries: MEXT, GKS, GOI-IES, Kazakhstan, DAAD, Hyundai CMK, LPDP, ANSO, ADB-JSP.
+
+---
+
+## 🔁 Phase 6: Retry with Exponential Backoff for Cerebras Queue Congestion (June 10, 2026)
+
+### Root Cause Analysis
+
+| Symptom | Root Cause |
+|---------|-----------|
+| Batch run aborts after only 4 scholarships verified (out of 83) | Cerebras free-tier `gpt-oss-120b` model runs on shared server queues. During high-traffic periods (US evening), the queue fills up and returns `429 queue_exceeded` — a transient congestion error. The old code treated this identically to a hard quota limit and aborted the entire remaining batch immediately. |
+| `quota_exceeded` error at 09:25 WIB despite not having made many requests | `queue_exceeded` is NOT a per-account daily quota. It is a real-time server capacity limit — when thousands of global users submit requests simultaneously, the queue fills up. It typically clears within 10–60 seconds. |
+
+### Changes Implemented
+
+#### 51. Exponential Backoff Retry for `queue_exceeded` — `verify_scholarship_llama()` (scout.py + sch_prototype.py)
+* **What changed**: The LLM retry loop was expanded from 2 timeout-only attempts to **4 total attempts** with explicit handling for `429 queue_exceeded`. Wait schedule: **10s → 20s → 30s** between consecutive attempts.
+  - **`queue_exceeded` 429**: Retried up to 3 times with increasing delays. Only raises `CerebrasQuotaExceededException` after all 4 attempts are exhausted.
+  - **Any other 429** (hard rate/account limit): Still raised immediately without retry — no change in that path.
+  - **Timeout**: Previously retried once after 5s. Now retried up to 3 times using the same 10s→20s→30s schedule.
+* **Why**: The `queue_exceeded` error is transient. A short wait and retry is almost always sufficient to recover without aborting the batch.
+
+#### 52. Per-Row Skip Instead of Full Batch Abort (runner.py)
+* **What changed**: When `CerebrasQuotaExceededException` is raised (after all 4 retries are exhausted), the runner now:
+  1. Logs the failure for that specific scholarship row.
+  2. Appends a `QUOTA_EXCEEDED` sentinel result (status=`UNKNOWN`, remarks explain the retry exhaustion).
+  3. **Continues to the next row** — the batch does NOT abort.
+  - `QUOTA_EXCEEDED` rows are excluded from the Google Sheets batch write (preserving last known good data in the sheet).
+  - The final summary reports how many rows were skipped due to congestion.
+  - `run_scout_pipeline()` now returns `True` (success) even when some rows were skipped.
+* **Why**: Previously, one congested request at row 7/83 would abandon the remaining 76 scholarships. Now only that one row is skipped and the batch completes fully.
+
+### Retry Behaviour Summary
+
+| Scenario | Old Behaviour | New Behaviour |
+|----------|--------------|---------------|
+| `429 queue_exceeded` on attempt 1 | Raise immediately, abort batch | Wait 10s, retry |
+| `429 queue_exceeded` on attempt 2 | — | Wait 20s, retry |
+| `429 queue_exceeded` on attempt 3 | — | Wait 30s, retry |
+| `429 queue_exceeded` on attempt 4 | — | Skip row, continue batch |
+| `429` (other type) | Raise immediately, abort batch | Raise immediately (no change) |
+| Timeout | Retry once after 5s | Retry up to 3 times (10s→20s→30s) |
+
+### ⏰ Best Time to Run (Indonesian Time / WIB)
+
+Cerebras servers are US-hosted. Their free-tier queue is heaviest during US business and evening hours.
+
+| Time (WIB) | Time (US EDT, UTC-4) | Cerebras Load |
+|------------|----------------------|---------------|
+| 01:00–12:00 WIB | 18:00–07:00 EDT (previous night) | ⚠️ Medium–High (US evening peak) |
+| **13:00–19:00 WIB** | **09:00–15:00 EDT** | ✅ **Lowest** (US early-mid morning, off-peak) |
+| 20:00–00:00 WIB | 13:00–17:00 EDT | ⚠️ Medium (US afternoon ramp-up) |
+
+> 💡 **Recommended run window: 1PM – 7PM WIB (siang/sore hari)** — this corresponds to 9AM–3PM EDT when Cerebras US servers are least loaded.
 
 ---
 
@@ -339,4 +410,29 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 | DAAD STEM | Correct deep link | Config-driven, pending re-test |
 | Inpex / BIM / Sultan Qaboos / HDR | `⚡ NET ERR` cell | Failure mode now visible, pending re-test |
 
-> ⚠️ **Re-testing required** after Phase 4 changes for all Phase B config entries: MEXT, GKS, GOI-IES, Kazakhstan, DAAD, Hyundai CMK, LPDP, ANSO, ADB-JSP.
+> ⚠️ **Re-testing required** after Phase 6 changes: Full 83-scholarship batch run to confirm `queue_exceeded` rows are now retried and recovered rather than aborting the batch.
+
+---
+
+## Phase 7: Aggressive Search Retry & Dry-Run Mode (June 11, 2026)
+
+### Problems Found
+
+- 18 NET ERR in batch run despite no sustained connection issue: _try_yahoo() had a bare except Exception: return None - any transient DNS/SSL blip killed Yahoo with zero retry. With the old 2-round limit, a brief outage = permanent NET ERR for that scholarship.
+- Spreadsheet still being written despite user request to disable: No env flag existed. runner.py always wrote unconditionally.
+
+### Changes Implemented
+
+#### 53. Yahoo Network-Error Retry with UA Rotation (crawler.py)
+- Split exception handling: SSLError/ConnectionError/Timeout retried up to 3x (5s, 10s backoff) with Chrome/Safari/Firefox UA rotation. Other exceptions still fail fast.
+- Timeout increased: 15s -> 20s per Yahoo request.
+
+#### 54. Three-Round Search (crawler.py)
+- Upgraded from 2 rounds to 3 rounds: Round 1 immediate, Round 2 after 30s (fast recovery), Round 3 after 60s (last-chance).
+- Max total Yahoo attempts: 9 (3 per round x 3 rounds).
+
+#### 55. SCOUT_DRY_RUN Environment Flag (runner.py)
+- New .env var SCOUT_DRY_RUN=true disables Google Sheets batch write entirely.
+- connect(read_only=True) called so no output columns are auto-created.
+- Email report and JSON results still generated normally.
+- Run banner prints [DRY RUN - SHEET WRITE DISABLED] for visibility in logs.
