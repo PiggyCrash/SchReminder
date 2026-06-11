@@ -6,6 +6,21 @@ Designed to handle real-time web search limitations, network blocks, API rate li
 
 ---
 
+## Stacks 
+
+| Component | Technology | Description |
+| :--- | :--- | :--- |
+| **Language** | Python 3.x | Core programming language |
+| **API Framework** | FastAPI + Uvicorn | High-performance asynchronous API endpoints and web server |
+| **LLM Inference** | Cerebras Inference API | High-speed inference using Llama 3.x models via OpenAI-compatible HTTP requests |
+| **Search Crawler** | DuckDuckGo, Yahoo, Bing, SearXNG | 4-engine fallback web search scheduler |
+| **Web Scraping** | `requests` + `beautifulsoup4` | HTTP client and HTML parsing for deep crawling target domains |
+| **Spreadsheet Integration** | Google Sheets API (`gspread`) | Read-only access to tracking sheet data using Google Service Account |
+| **Email Service** | SMTP (`smtplib`) | Automated HTML digest reporting with SSL (465) / STARTTLS (587) support |
+| **Translation Engine** | MyMemory API | Automated free translation for local/non-English scholarship websites |
+| **Configuration / Env** | `python-dotenv` | Secure loading of API keys and server variables |
+| **Data Validation** | `pydantic` | Typed schemas for configuration overrides and structured LLM outputs |
+
 ## 🛠️ Premium Architectural Features
 
 ### 1. Robust Multi-Engine Crawler (Anti-CAPTCHA & Failover)
@@ -14,7 +29,7 @@ Designed to handle real-time web search limitations, network blocks, API rate li
 * **Targeted Deep Crawling**: Crawls program index pages and automatically branches into child links (e.g. `/news`, `/announcements`, `/deadline`) matching structural keywords to locate text-based timeline notices.
 
 ### 2. Config-Driven Scholarship Overrides
-Located in [scholarship_config.py](file:///c:/Work/schreminder/src/config/scholarship_config.py), this engine overrides crawler behavior for complex sites:
+Located in `schreminder/src/config/scholarship_config.py`, this engine overrides crawler behavior for complex sites:
 * `preferred_query` / `preferred_urls`: Directs searches to the exact sub-pages.
 * `locked_urls`: Skips search engines entirely to scrape only target portals (e.g. for GKS).
 * `date_source_domain`: Enforces date authority, preventing LLM from pulling dates from third-party blogs or wrong embassy regions.
@@ -22,7 +37,7 @@ Located in [scholarship_config.py](file:///c:/Work/schreminder/src/config/schola
 * `needs_translation`: Detects non-English sites (under 5% ASCII ratio) and automatically translates page texts via MyMemory API.
 
 ### 3. Balanced Name Parser for University-Specific recommendations
-* Handled in [name_parser.py](file:///c:/Work/schreminder/src/engine/name_parser.py), it detects parenthesized tags like `(Scholarship Body) University Name` (e.g., `(MEXT Scholarship) Hokkaido University`) and automatically generates queries targeting specific recommendation guidelines.
+* Handled in `schreminder/src/engine/name_parser.py`, it detects parenthesized tags like `(Scholarship Body) University Name` (e.g., `(MEXT Scholarship) Hokkaido University`) and automatically generates queries targeting specific recommendation guidelines.
 
 ### 4. Enterprise API Congestion Resilience
 * **Queue Congestion Retry**: Automatically detects Cerebras `429 queue_exceeded` server loads and retries with backoff delays (**10s ➔ 20s ➔ 30s**).
@@ -52,6 +67,10 @@ The script dynamically maps column indices by matching Row 1 headers against cas
 | **Input** | `estimated_timeline` | `Estimated Timeline` | `Timeline`, `Est. Date` |
 | **Input** | `note` | `Note` | *Optional operator remarks* |
 | **Output** | `status` | `Verified Status` | `Scout Status` |
+
+### 2. Returning JSON values
+| Column Type | Script Key | Preferred Header | Supported Aliases / Alternative Headings |
+| :--- | :--- | :--- | :--- |
 | **Output** | `start_date` | `Verified Start Date` | `Start Date`, `Application Start Date` |
 | **Output** | `deadline` | `Verified Deadline` | `Deadline`, `Application Deadline` |
 | **Output** | `verified_info_url` | `Verified Info Link` | `Verified Source Link`, `Verified Info URL` |

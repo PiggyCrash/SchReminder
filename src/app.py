@@ -57,7 +57,7 @@ def verify_single(request: VerificationRequest):
     from src.search.crawler import search_scholarship_with_retry, fetch_webpage_content, clean_html, extract_hyperlinks, filter_candidate_links, is_news_domain, OFFICIAL_DOMAINS
     from src.engine.scout import verify_scholarship_llama, post_process_result, CerebrasQuotaExceededException
     from src.engine.name_parser import parse_scholarship_name
-    from src.config.scholarship_config import get_scholarship_config
+    from scholarship_config.scholarship_config import get_scholarship_config
     from src.runner import _process_single_scholarship
     import os
 

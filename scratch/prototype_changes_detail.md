@@ -25,7 +25,7 @@ graph TD
 
 ---
 
-## ðŸ“… Version 1: Batch-Sync Production Engine ([runner.py](file:///c:/Work/schreminder/src/runner.py), [scout.py](file:///c:/Work/schreminder/src/engine/scout.py))
+## Version 1: Batch-Sync Production Engine `schreminder/src/runner.py`, `schreminder/src/engine/scout.py`
 
 ### Method/Logic
 The initial release was designed to run as an automated batch pipeline (via CLI or FastAPI endpoints like `/sync`). It performed the following steps:
@@ -43,10 +43,10 @@ The initial release was designed to run as an automated batch pipeline (via CLI 
 
 ---
 
-## ðŸ§ª Version 2: The Prototyping Phase ([sch_prototype.py](file:///c:/Work/schreminder/scratch/sch_prototype.py))
+## Version 2: The Prototyping Phase `schreminder/src/sch_prototype.py`
 
 ### Method/Logic
-To resolve Version 1's issues without constantly wasting Google Sheets and Gemini API quotas, a prototyping file ([sch_prototype.py](file:///c:/Work/schreminder/scratch/sch_prototype.py)) was introduced to:
+To resolve Version 1's issues without constantly wasting Google Sheets and Gemini API quotas, a prototyping file (`schreminder/src/sch_prototype.py`) was introduced to:
 * **Isolate Testing**: Focus on a single scholarship at a time (`TEST_SCHOLARSHIP_NAME`) instead of batch checking the entire sheet.
 * **Compare Models**: Switch the LLM provider to Cerebras (`zai-glm-4.7` or `gpt-oss-120b`) via an OpenAI-compatible endpoint.
 
@@ -78,7 +78,7 @@ To resolve Version 1's issues without constantly wasting Google Sheets and Gemin
 
 #### 7. Country/Region Contextual Queries
 * **Problem**: Yahoo search returned global or non-Indonesian target pages, causing inaccurate date tracking.
-* **Fix**: Expanded the search query to include the region: `{Scholarship Name} Indonesia deadline {Year}`. Extended [google_sheets.py](file:///c:/Work/schreminder/src/spreadsheet/google_sheets.py) to extract `country_region` to support this search parameter.
+* **Fix**: Expanded the search query to include the region: `{Scholarship Name} Indonesia deadline {Year}`. Extended `schreminder/src/spreadsheet/google_sheets.py` to extract `country_region` to support this search parameter.
 
 #### 8. Binary PDF Swapping
 * **Problem**: Search links pointing directly to `.pdf` guidelines broke the HTML text parser.
@@ -90,7 +90,7 @@ To resolve Version 1's issues without constantly wasting Google Sheets and Gemin
 
 #### 10. Safe Sheet Integration & Read-Only Mode
 * **Problem**: Running prototype tests could overwrite or corrupt production sheet cells, or fail with `APIError: [400] Range exceeds grid limits` because output columns were not initialized.
-* **Fix**: Integrated `read_only=True` parameter in `conn.connect()` and updated the core spreadsheet library [google_sheets.py](file:///c:/Work/schreminder/src/spreadsheet/google_sheets.py). Disabled spreadsheet writing in the prototype completely, routing all reports to email logs.
+* **Fix**: Integrated `read_only=True` parameter in `conn.connect()` and updated the core spreadsheet library `schreminder/src/spreadsheet/google_sheets.py`. Disabled spreadsheet writing in the prototype completely, routing all reports to email logs.
 
 #### 11. Refined Search Queries & Sanitized Links
 * **Problem**: Queries like `{name} scholarship` were too broad. Also, placeholder string values like `"None"`, `"null"`, `"-"`, or `"n/a"` returned by the LLM caused broken HTML links (e.g. `<a href="None">`) in output reports.
@@ -118,7 +118,7 @@ To resolve Version 1's issues without constantly wasting Google Sheets and Gemin
 
 ---
 
-## ðŸ—ï¸ Phase 3: Zero-Historical-Dependency Architecture
+## Version 3: Zero-Historical-Dependency Architecture
 
 ### Design Principle Change
 > *"No cheating. The program reads only the scholarship name from the spreadsheet. Everything else â€” links, dates, processing method â€” must be discovered independently through web scraping."*
@@ -172,17 +172,17 @@ This was a deliberate integrity constraint enforced after tests showed the pipel
 
 ---
 
-## ðŸŽ¯ Current Success State
+## Current Success State
 With the robust prototyping upgrades, the scouting engine has been successfully validated across several major targets:
 1. **GKS (Global Korea Scholarship)**: Correctly verified as `CLOSED` (Feb 12 to Feb 25, 2026), successfully navigating the Indonesia-specific branch link and emailing the report.
 2. **Zuyd ZES - Reguler**: Correctly verified as `CLOSED` (deadline: May 1) based on the official university portal data.
 3. **Beasiswa Indonesia Bangkit (BIB) LPDP**: Correctly verified as `CLOSED` (original dates 2025-03-28 to 2025-06-07). The URL Hallucination Guard successfully intercepted a hallucinated LPDP registration path and reverted it to the historical link.
 
-> âš ï¸ **Re-testing required** after Phase 3 changes for: Stipendium Hungaricum, MEXT, GKS, ARICE Romania, Akebono Foundation.
+> **Re-testing required** after Phase 3 changes for: Stipendium Hungaricum, MEXT, GKS, ARICE Romania, Akebono Foundation.
 
 ---
 
-## ðŸš€ Phase 4: Robustness, Config-Driven Scraping & Uni-to-Uni Schema
+## Version 4: Robustness, Config-Driven Scraping & Uni-to-Uni Schema
 
 ### Design Principles
 > *"Failures must be distinguishable. Wrong source is worse than no source. Per-scholarship knowledge belongs in code, not in the engineer's head."*
@@ -193,12 +193,12 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 
 | Symptom | Root Cause |
 |---------|-----------|
-| Inpex, BIM, Sultan Qaboos, HDR â€” all `None` result, indistinguishable | `NETWORK_FAILURE` silently coerced to generic remark. Could not tell if it was network down or empty results |
-| EGYAID â€” intermittent `None` on first run, OK on second | Transient DDG/Yahoo failure with no retry after wait |
+| Inpex, BIM, Sultan Qaboos, HDR - all `None` result, indistinguishable | `NETWORK_FAILURE` silently coerced to generic remark. Could not tell if it was network down or empty results |
+| EGYAID - intermittent `None` on first run, OK on second | Transient DDG/Yahoo failure with no retry after wait |
 | MEXT always gets `studyinjapan.go.jp` (wrong, global portal) | Generic search query; Indonesian embassy page never in top 5 results |
-| GKS gets Korean-language portal instead of Indonesia-specific dates | Same â€” wrong search result bias |
-| GOI-IES / Kazakhstan â€” zero results or wrong language | Low ranking + non-English page; no language fallback |
-| DAAD STEM â€” news article URL instead of DB deep link | Param-based URL never indexed by search engines |
+| GKS gets Korean-language portal instead of Indonesia-specific dates | Same - wrong search result bias |
+| GOI-IES / Kazakhstan - zero results or wrong language | Low ranking + non-English page; no language fallback |
+| DAAD STEM - news article URL instead of DB deep link | Param-based URL never indexed by search engines |
 | Hyundai CMK â€” month-range dates (Dec-Jan) not parsed | LLM had no instruction for month-range inference |
 | Only end-date found â†’ status shows CLOSED even if open | No start-date estimation logic |
 | Status=T, Verified=F wasting search/LLM API calls | No bypass path for manually-confirmed scholarships |
@@ -227,10 +227,10 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 * **`NO_RESULTS`**: `[NO RESULTS] Search engines responded but returned 0 parseable result links...`
 
 #### 30. Email Cell Colour per Failure Mode (A3)
-* Grey `âš¡ NET ERR` for `NETWORK_FAILURE`
-* Dark orange `ðŸš« BLOCKED` for `BLOCKED`
-* Light grey `â“ NO DATA` for `NO_RESULTS`
-* Purple `âœ… VERIFIED` for `BYPASS`
+* Grey `NET ERR` for `NETWORK_FAILURE`
+* Dark orange `BLOCKED` for `BLOCKED`
+* Light grey `NO DATA` for `NO_RESULTS`
+* Purple `VERIFIED` for `BYPASS`
 
 #### 31. T+F Bypass Path (A4)
 * **What changed**: Before search, checks Col C (`Status`) and Col D (`Verified`). If `T + F`, reads Col B, G, H, I, J from the sheet and emails them directly â€” skipping search and LLM entirely.
@@ -326,18 +326,18 @@ After a full batch test of ~30 scholarships, three distinct failure modes were i
 
 ---
 
-## ðŸŽ¯ Current Success State
+## Current Success State
 
 | Scholarship | Expected Status | Notes |
 |-------------|-----------------|-------|
 | GKS (Global Korea Scholarship) | CLOSED | Validated Phase 3 |
 | Zuyd ZES - Reguler | CLOSED | Validated Phase 3 |
 | Beasiswa Indonesia Bangkit (BIB) LPDP | CLOSED | Validated Phase 3 |
-| **(IGP Special MEXT Scholarship) Hokkaido University** | **OPEN** | **âœ… Fully validated Phase 5 â€” correct page, correct 2026 dates, confidence 1.0** |
+| **(IGP Special MEXT Scholarship) Hokkaido University** | **OPEN** | **Fully validated Phase 5 - correct page, correct 2026 dates, confidence 1.0** |
 | All batch test passing (18+ scholarships) | Various | Validated Phase 4 batch run |
 | MEXT, GKS, GOI-IES, Kazakhstan | Correct source | Config-driven, pending re-test |
 | DAAD STEM | Correct deep link | Config-driven, pending re-test |
-| Inpex / BIM / Sultan Qaboos / HDR | `âš¡ NET ERR` cell | Failure mode now visible, pending re-test |
+| Inpex / BIM / Sultan Qaboos / HDR | `NET ERR` cell | Failure mode now visible, pending re-test |
 
 
 > ⚠️ **Re-testing required** after Phase 4 changes for all Phase B config entries: MEXT, GKS, GOI-IES, Kazakhstan, DAAD, Hyundai CMK, LPDP, ANSO, ADB-JSP.
@@ -414,7 +414,7 @@ Cerebras servers are US-hosted. Their free-tier queue is heaviest during US busi
 
 ---
 
-## Phase 7: Aggressive Search Retry & Dry-Run Mode (June 11, 2026)
+## Version 7: Aggressive Search Retry & Dry-Run Mode (June 11, 2026)
 
 ### Problems Found
 

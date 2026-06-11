@@ -49,7 +49,7 @@ from src.engine.scout import (
     CerebrasQuotaExceededException,
 )
 from src.engine.name_parser import parse_scholarship_name
-from src.config.scholarship_config import get_scholarship_config
+from scholarship_config.scholarship_config import get_scholarship_config
 from src.notification.mailer import send_daily_email_report
 
 # Setup logging
@@ -232,7 +232,7 @@ def _process_single_scholarship(
                     "NO_RESULTS": (
                         "[NO RESULTS] Search engines responded but returned 0 parseable "
                         "result links. The scholarship name may need a config override in "
-                        "src/config/scholarship_config.py."
+                        "scholarship_config/scholarship_config.py."
                     ),
                 }
                 remark = remark_map.get(search_status, "[UNKNOWN SEARCH FAILURE]")

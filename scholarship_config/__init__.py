@@ -1,0 +1,1 @@
+# scholarship_config package
