@@ -83,8 +83,12 @@ class GoogleSheetsConnector:
             logger.info("Parsing Google Service Account credentials...")
             creds_dict = json.loads(self.service_account_json_str)
 
-            logger.info(f"Authenticating via Google Service Account: {creds_dict.get('client_email')}")
-            self.client = gspread.service_account_from_dict(creds_dict)
+            logger.info(f"Authenticating via Google Service Account (READ-ONLY): {creds_dict.get('client_email')}")
+            # Read-only OAuth scope — the API will reject any write attempt at the network level.
+            self.client = gspread.service_account_from_dict(
+                creds_dict,
+                scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+            )
 
             logger.info(f"Opening Spreadsheet ID: '{self.spreadsheet_id}'")
             sh = self.client.open_by_key(self.spreadsheet_id)

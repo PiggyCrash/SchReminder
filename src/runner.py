@@ -478,26 +478,20 @@ No search engine was used. These pre-configured URLs are the designated authorit
 def run_scout_pipeline() -> bool:
     """
     Executes the full daily automated scout pipeline:
-      1. Reads ALL active tracking rows (Status=T) from Google Sheet.
+      1. Reads ALL active tracking rows (Status=T) from Google Sheet (READ-ONLY).
       2. For each row: A4 bypass check -> config -> search -> scrape -> LLM -> post-process.
-      3. On quota exceeded: aborts loop, processes partial results.
-      4. Batch writes all results back to Google Sheet  [SKIPPED if SCOUT_DRY_RUN=true].
-      5. Sends HTML email report.
-      6. Saves JSON to scratch/result/.
+      3. On quota exceeded: skips that row, continues batch.
+      4. Sends HTML email report.
+      5. Saves JSON to scratch/result/.
 
-    Set SCOUT_DRY_RUN=true in .env to skip the spreadsheet write entirely.
+    The Google Sheet is NEVER written to. Results go to email + JSON only.
     """
     load_dotenv()
     run_ts     = datetime.datetime.now().isoformat()
     model_name = os.getenv("OPENAI_MODEL", os.getenv("OPENAI_MODEL_2", "gpt-oss-120b"))
-    dry_run    = os.getenv("SCOUT_DRY_RUN", "false").strip().lower() == "true"
-
     start_time = time.time()
     print(f"\n{Colors.BOLD}{Colors.HEADER}======================================================================")
-    if dry_run:
-        print("    LAUNCHING AUTOMATED ACADEMIC SCOUT  [DRY RUN — SHEET WRITE DISABLED]")
-    else:
-        print("        LAUNCHING AUTOMATED ACADEMIC SCOUT & SHEET SYNC RUNNER")
+    print("        LAUNCHING AUTOMATED ACADEMIC SCOUT (SHEET: READ-ONLY)")
     print(f"======================================================================{Colors.END}\n")
 
     # 1. Connect to Google Sheets
@@ -629,25 +623,7 @@ def run_scout_pipeline() -> bool:
     print(f"       ALL {len(processed_results)}/{total_count} ROWS PROCESSED")
     print(f"======================================================================{Colors.END}\n")
 
-    # 3. Batch write to Google Sheet
-    if processed_results:
-        if dry_run:
-            print(f"{Colors.WARNING}[DRY RUN] Skipping Google Sheets write — SCOUT_DRY_RUN=true.{Colors.END}\n")
-        else:
-            try:
-                print(f"{Colors.BLUE}Initiating single consolidated batch write back to Google Sheets...{Colors.END}")
-                # Filter to only rows that can be written:
-                # - BYPASS rows: sheet already has correct data, nothing to overwrite
-                # - QUOTA_EXCEEDED rows: no LLM output; preserve last known good sheet data
-                writable = [r for r in processed_results
-                            if r.get("search_status") not in ("BYPASS", "QUOTA_EXCEEDED")]
-                sheet_connector.batch_write_results(writable)
-                print(f"{Colors.GREEN}[Success] Google Sheet successfully updated.{Colors.END}\n")
-            except Exception as sheet_err:
-                logger.error(f"Sheet write failed: {str(sheet_err)}")
-                print(f"{Colors.FAIL}[Failed] Sheet Sync Failure: {str(sheet_err)}{Colors.END}\n")
-
-    # 4. Dispatch email report
+    # 3. Dispatch email report
     try:
         print(f"{Colors.BLUE}Compiling and dispatching styled HTML digest report email...{Colors.END}")
         email_sent = send_daily_email_report(processed_results, quota_exceeded=quota_exceeded)
